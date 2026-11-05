@@ -241,4 +241,4 @@ Written by Altair with DeepSeek-V4.1-Flash-1017 in Qoder.
 
 ## License
 
-MIT
+[MIT](LICENSE)

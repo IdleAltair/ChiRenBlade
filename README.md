@@ -114,7 +114,10 @@ work: `spent` is what the game charged, `kept` is what the mod lets stay gone.
 
 ## Notes
 
-- The mod only affects the ChiRen blade; other weapons are untouched.
+- The mod only affects the ChiRen blade; other weapons are untouched. The free attacks and the cost scale apply
+  only to the ChiRen heavy attacks. The clash trigger itself does not check the weapon, so a clash with another
+  weapon resets the charge count; those charges are spent on the next ChiRen heavy attack. `DeflectWindowFrames`
+  is the exception: it changes the global block-parry window and applies to every weapon.
 - The fire is an extra effect instance on top of the game's own fire. If the blade is already burning from full
   blade energy, both run and expire independently.
 - The clash trigger is the deflect component, not the parry ability. Blocks are not required; a clash is.
@@ -214,7 +217,9 @@ return {
 
 ### 说明与限制
 
-- 只影响炽刃，其他武器不受影响。
+- 免耗和杀气减半只作用于炽刃的重攻击，其他武器不受影响。拼刀触发本身不检查武器：用别的武器拼刀也会
+  重置免耗次数，次数会留到换回炽刃打重攻击时使用。`DeflectWindowFrames` 是例外，它改的是全局格挡弹反
+  窗口，对所有武器生效。
 - 火焰是额外的一层效果实例。刀本身已经因为刀劲充满在燃烧时，两层各烧各的、各自到期，不会互相覆盖。
 - 免耗的计数口径是**技能激活**，不是命中：被打断、状态不允许而没放出来时不扣次数。
 - 杀气减半不是即时折扣，而是扣后约一秒内补回；补回过程分几次采样，日志会逐条记录。

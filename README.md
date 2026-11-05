@@ -1,5 +1,7 @@
 # ChiRen Blade
 
+[English](#chiren-blade) | [中文指南](#中文指南)
+
 A [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) Lua mod for Phantom Blade Zero (Unreal Engine 5.7): after a
 successful clash with the ChiRen blade, the next few heavy attacks cost no Shachi and the blade burns;
 independently of that, every heavy attack costs half the usual Shachi.
@@ -134,6 +136,107 @@ powershell -ExecutionPolicy Bypass -File .\pack.ps1        # dist\ChiRenBlade-<v
 
 `deploy.ps1` keeps an existing `Scripts\config.lua` in the game; `-ResetConfig` overwrites it with the shipped
 one.
+
+## 中文指南
+
+炽刃专用的 UE4SS Lua mod，适用于《影之刃零》（UE 5.7）。核心是三条互相独立的改动：拼刀后给几次免杀气
+重攻击、给刀上火、以及永久降低重攻击的杀气消耗。另有一个可选的格挡弹反窗口调整，默认关闭。
+
+游戏版本 `26367565`（Steam），配套的定制 UE4SS `v3.0.1-1195-g1ceefac8`。
+
+### 功能
+
+- **拼刀后免杀气。** 玩家的弹刀组件 `DeflectComponent:ConsumeReceivedFrame` 被消费时算一次拼刀。之后
+  接下来 `Charges` 次重攻击（Y 键的 B 系：`GA_Hun_ChiRen_B / BB / BBB / BD / BSup / C`）不消耗杀气。
+  做法是在技能激活前把实例上的 `Shachi Cost` 和 `Shachi Cost Min` 写成 0，用完后写回原值，不永久改资产。
+- **刀上火。** 拼刀同时施加武器自己的 `GE_ChiRen_FireState`，持续 `FireSeconds` 秒。原版攒满刀劲的
+  15 秒火焰是另一个独立实例，两者不会互相刷新或缩短。
+- **永久杀气减半。** `HeavyCostScale` 默认 0.5。游戏不读技能自带的 Cost 字段，也不读
+  `HeavyAttack_ShachiCostReduction` 属性，所以做法是「先扣后退」：每次非免耗重攻击激活后盯杀气条约一秒，
+  检测到下降就把倍率之外的部分写回去。日志里的 `refund ... spent ... kept ...` 就是这一步。
+- **可选格挡弹反窗口。** `DeflectWindowFrames` 默认 0（不改）。设成非 0 时，把全部 5 份难度配置的
+  `Deflect Perfect Window Frames` 改成该值。注意这是**格挡弹反**的完美窗口，不是拼刀窗口——拼刀的判定帧
+  写在每个招式资产里，游戏没有全局配置项。
+
+### 安装
+
+1. 先把影之刃零专用的定制 UE4SS 装进 `<游戏目录>\platform\steam\`
+   （`dwmapi.dll` 和 `ue4ss\` 文件夹；来源见 [PBZ modding resources](https://github.com/KintaroModding)）。
+   原版 UE4SS 不适用于这个游戏。
+2. 把 `ChiRenBlade` 文件夹放进 `<游戏目录>\platform\steam\ue4ss\Mods\`。
+3. 启动游戏。日志写在 `<游戏目录>\platform\steam\ue4ss\UE4SS.log`，第一行应为
+   `[ChiRenBlade] 0.31 loaded`。
+
+文件夹里带有 `enabled.txt`，不需要在 `mods.txt` 里登记。
+
+### 配置
+
+编辑 `ChiRenBlade\Scripts\config.lua`，改完保存并**重启游戏**。这个文件和 `main.lua` 分开，mod 升级不会
+覆盖你的设置；缺失项、类型错误或超出范围会用回默认值，并在日志里点名。
+
+| 参数 | 默认 | 范围 | 作用 |
+| --- | --- | --- | --- |
+| `Charges` | `6` | 0-20 | 拼刀后多少次重攻击免杀气。按技能**激活**计数，不是命中；一套 B→BB→BBB 按三下算 3 次。`0` = 关闭免耗（火焰不受影响）。 |
+| `FireEnabled` | `true` | - | 拼刀后是否给刀上火。 |
+| `FireSeconds` | `5` | 0.5-30 | mod 施加的火焰持续几秒。原版攒满刀劲的 15 秒火不受影响。 |
+| `CooldownSeconds` | `0.6` | 0-2 | 一次拼刀会连续触发很多帧，这个窗口用来去重。设太大可能吞掉紧挨着的第二次拼刀。 |
+| `TriggerOnDeflect` | `true` | - | 用玩家的弹刀组件作为拼刀触发点。关掉后免耗和火都不会触发，一般只用于排查。 |
+| `HeavyCostScale` | `0.5` | 0.05-1.0 | 重攻击杀气的永久倍率。`0.5` = 半价，`1.0` = 关闭。实现是扣后回补，所以杀气条会先掉再回。与「正气凌然」（-30%）叠加时约为原价的 35%。 |
+| `DeflectWindowFrames` | `0` | 0-60 | **格挡弹反**的完美窗口帧数（30 fps），游戏原值 6 即 0.2 秒。`0` = 不改。会写入全部 5 份难度。不是拼刀窗口。 |
+| `LogEvents` | `true` | - | 是否把拼刀、免耗、杀气消耗和火焰时长写进 `UE4SS.log`。 |
+
+范围外的值会保留默认值，日志会说明是哪一项。
+
+### 示例
+
+```lua
+return {
+    Charges = 6,
+    FireEnabled = true,
+    FireSeconds = 5,
+    CooldownSeconds = 0.6,
+    TriggerOnDeflect = true,
+    HeavyCostScale = 0.5,
+    DeflectWindowFrames = 0,   -- 想加长格挡弹反窗口就改这里，例如 12
+    LogEvents = true,
+}
+```
+
+### 日志示例
+
+```
+[ChiRenBlade] 0.31 loaded
+[ChiRenBlade] hooked ConsumeReceivedFrame
+[ChiRenBlade] hooked heavy GA_Hun_ChiRen_BB_C
+[ChiRenBlade] clash (deflect frame consumed): 3 free heavy attacks
+[ChiRenBlade] fire: applied, asked 5.0 s
+[ChiRenBlade] free heavy: GA_Hun_ChiRen_BB_C (2 left)
+[ChiRenBlade] heavy cost +60ms: 384 -> 384 (delta 0) consumed=168
+[ChiRenBlade] refund +400ms: spent 26, kept 13, wrote 198 ok=true
+[ChiRenBlade] fire lasted 5.12 s (asked 5.0)
+```
+
+`delta 0` 且上面有 `free heavy` 行 = 这次攻击没花杀气。`refund` 行是杀气减半在工作：`spent` 是游戏实际
+扣掉的，`kept` 是 mod 允许留下的部分。
+
+### 说明与限制
+
+- 只影响炽刃，其他武器不受影响。
+- 火焰是额外的一层效果实例。刀本身已经因为刀劲充满在燃烧时，两层各烧各的、各自到期，不会互相覆盖。
+- 免耗的计数口径是**技能激活**，不是命中：被打断、状态不允许而没放出来时不扣次数。
+- 杀气减半不是即时折扣，而是扣后约一秒内补回；补回过程分几次采样，日志会逐条记录。
+- 拼刀窗口目前没有全局参数，无法通过配置加长；这是游戏数据结构决定的，不是 mod 的取舍。
+- 破韧/打断 boss 的试验版本（0.29）已移除，完整的测量记录和失败尝试保留在
+  [notes/break-research.md](notes/break-research.md)，以后需要时可以作为继续开发的起点。
+
+### 部署与打包（开发者）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy.ps1      # 复制到游戏的 ue4ss\Mods
+powershell -ExecutionPolicy Bypass -File .\pack.ps1        # 生成 dist\ChiRenBlade-<version>.zip
+```
+
+`deploy.ps1` 会保留游戏里已有的 `Scripts\config.lua`；加 `-ResetConfig` 则用发布的版本覆盖。
 
 ## Credits
 

@@ -1,0 +1,17 @@
+{
+  "name": "ChiRen Blade",
+  "folder": "ChiRenBlade",
+  "author": "Altair",
+  "contributors": [
+    "DeepSeek-V4.1-Flash-1017 (Qoder model selector)"
+  ],
+  "version": "0.30",
+  "description": "After a successful clash with the ChiRen blade, the next heavy attacks cost no Shachi and the blade burns for a short while. Independently, every heavy attack costs half the usual Shachi.",
+  "kind": "ue4ss",
+  "game": "phantombladezero",
+  "gameFolder": "PBZ",
+  "win64Path": "platform\\steam",
+  "gameVersion": "Steam build 26367565",
+  "engine": "UE5_7",
+  "ue4ss": "v3.0.1-1195-g1ceefac8"
+}

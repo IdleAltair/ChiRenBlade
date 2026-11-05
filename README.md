@@ -18,14 +18,14 @@ Made with game build `26367565` (Steam) and UE4SS `v3.0.1-1195-g1ceefac8` (the c
   original blade-energy mechanic keeps its own 15-second fire; the two are separate effect instances and do not
   shorten each other.
 - **Permanent half cost.** `HeavyCostScale` (0.5 by default) halves the Shachi every ChiRen heavy attack costs. The
-  game does not read the ability's `Shachi Cost` fields nor the `HeavyAttack_ShachiCostReduction` attribute (both
-  were written and changed nothing), so the mod watches the Shachi bar for about a second after each non-free heavy
-  attack and refunds the part the scale removes. The log line is `refund ... spent ... kept ...`.
+  game does not read the ability's `Shachi Cost` fields nor the `HeavyAttack_ShachiCostReduction` attribute, so the
+  mod watches the Shachi bar for about a second after each non-free heavy attack and refunds the part the scale
+  removes. The log line is `refund ... spent ... kept ...`.
 - **Independent switches.** The refund, the fire and the cost scale are separate: set `FireEnabled = false` and the
   free heavy attacks still work.
 - **Optional block-parry window.** `DeflectWindowFrames` (off by default) raises the perfect window of the block
   parry, the game setting `Deflect Perfect Window Frames` (6 frames at 30 fps, 0.2 s). This is not the weapon
-  clash: a clash's frames are part of each attack asset and have no global setting.
+  clash's window.
 
 ## Install
 
@@ -52,7 +52,7 @@ so. Restart the game after a change.
 | `CooldownSeconds` | `0.6` | 0-2 | Debounce between two clash triggers, in seconds. |
 | `TriggerOnDeflect` | `true` | - | Use the deflect component as the clash trigger. |
 | `HeavyCostScale` | `0.5` | 0.05-1.0 | Permanent scale for the heavy attack cost (`0.5` = half, `1.0` = off). Implemented as a refund after the charge, because the game ignores the ability's cost fields. |
-| `DeflectWindowFrames` | `0` | 0-60 | Perfect window of the **block parry**, in frames at 30 fps (game value 6). Not the weapon clash, which has no global window setting. Written to every difficulty. `0` = no change. |
+| `DeflectWindowFrames` | `0` | 0-60 | Perfect window of the **block parry**, in frames at 30 fps (game value 6). Not the weapon clash. Written to every difficulty. `0` = no change. |
 | `LogEvents` | `true` | - | Write clash, free-attack, cost and fire lines to `UE4SS.log`. |
 
 A value outside its range keeps the default, and the log names the setting.
@@ -121,12 +121,6 @@ work: `spent` is what the game charged, `kept` is what the mod lets stay gone.
 - The refund is a post-charge correction: the bar drops first, then the kept part is written back within about a
   second. It is not an instantaneous discount.
 
-## Break research (parked)
-
-A clash-break/stagger feature (interrupting the attacker through the hit reaction state machine) was developed
-up to a working state switch and then removed in 0.30. The measurements, API signatures and the remaining ideas
-are kept in [notes/break-research.md](notes/break-research.md).
-
 ## Deploy and pack
 
 ```powershell
@@ -155,8 +149,7 @@ one.
   `HeavyAttack_ShachiCostReduction` 属性，所以做法是「先扣后退」：每次非免耗重攻击激活后盯杀气条约一秒，
   检测到下降就把倍率之外的部分写回去。日志里的 `refund ... spent ... kept ...` 就是这一步。
 - **可选格挡弹反窗口。** `DeflectWindowFrames` 默认 0（不改）。设成非 0 时，把全部 5 份难度配置的
-  `Deflect Perfect Window Frames` 改成该值。注意这是**格挡弹反**的完美窗口，不是拼刀窗口——拼刀的判定帧
-  写在每个招式资产里，游戏没有全局配置项。
+  `Deflect Perfect Window Frames` 改成该值。注意这是**格挡弹反**的窗口，不是拼刀窗口。
 
 ### 安装
 
@@ -225,9 +218,6 @@ return {
 - 火焰是额外的一层效果实例。刀本身已经因为刀劲充满在燃烧时，两层各烧各的、各自到期，不会互相覆盖。
 - 免耗的计数口径是**技能激活**，不是命中：被打断、状态不允许而没放出来时不扣次数。
 - 杀气减半不是即时折扣，而是扣后约一秒内补回；补回过程分几次采样，日志会逐条记录。
-- 拼刀窗口目前没有全局参数，无法通过配置加长；这是游戏数据结构决定的，不是 mod 的取舍。
-- 破韧/打断 boss 的试验版本（0.29）已移除，完整的测量记录和失败尝试保留在
-  [notes/break-research.md](notes/break-research.md)，以后需要时可以作为继续开发的起点。
 
 ### 部署与打包（开发者）
 

@@ -165,6 +165,8 @@ one.
 
 文件夹里带有 `enabled.txt`，不需要在 `mods.txt` 里登记。
 
+更详细的小白安装教程（含常见问题）见 [docs/安装教程.md](docs/安装教程.md)。
+
 ### 配置
 
 编辑 `ChiRenBlade\Scripts\config.lua`，改完保存并**重启游戏**。这个文件和 `main.lua` 分开，mod 升级不会

@@ -36,6 +36,14 @@ return {
     -- 把倍率之外的部分补回去。拼刀免耗的那几次不参与回补。
     HeavyCostScale = 0.5,
 
+    -- The block parry's perfect window, in frames at 30 fps (0-60). Game value is 6 (0.2 s).
+    -- This is NOT the weapon clash window: the clash's frames are part of each attack asset, and the
+    -- game has no global setting for them. Applies to every difficulty. 0 = no change.
+    -- 格挡弹反的完美判定窗口，30 fps 下的帧数（0-60），游戏原值 6（0.2 秒）。
+    -- 这不是拼刀窗口：拼刀的判定帧写在每招的资产里，游戏没有对应的全局配置项。
+    -- 五个难度都会写入。0 = 不修改。
+    DeflectWindowFrames = 0,
+
     -- Write clash, free-attack, cost and fire lines to UE4SS.log.
     -- 把拼刀、免耗、消耗和火焰时长写进 UE4SS.log。
     LogEvents = true,

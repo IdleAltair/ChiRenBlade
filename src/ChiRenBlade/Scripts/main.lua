@@ -1,7 +1,7 @@
 local UEHelpers = require("UEHelpers")
 
 local MOD = "ChiRenBlade"
-local VERSION = "0.30"
+local VERSION = "0.31"
 
 local DEFAULTS = {
     Charges = 6,
@@ -10,8 +10,12 @@ local DEFAULTS = {
     CooldownSeconds = 0.6,
     TriggerOnDeflect = true,
     HeavyCostScale = 0.5,
+    DeflectWindowFrames = 0,
     LogEvents = true,
 }
+
+-- The game's global combat config asset holds the block-parry perfect window.
+local COMBAT_CONFIG_CLASS = "PDA_GlobalCombatConfig_C"
 
 local HEAVY_CLASSES = {
     "GA_Hun_ChiRen_B_C",
@@ -92,6 +96,7 @@ local LIMITS = {
     FireSeconds = { 0.5, 30 },
     CooldownSeconds = { 0, 2 },
     HeavyCostScale = { 0.05, 1.0 },
+    DeflectWindowFrames = { 0, 60 },
 }
 
 local Settings = {}
@@ -131,6 +136,14 @@ local function LogEvent(fmt, ...)
     if Settings.LogEvents then
         log(fmt, ...)
     end
+end
+
+local function WriteNumber(object, name, value)
+    local before = readField(object, name)
+    local ok, err = pcall(function() object[name] = value end)
+    local after = readField(object, name)
+    LogEvent("%s: %s -> %s (ok=%s%s)", name, tostring(before), tostring(after), tostring(ok),
+        ok and "" or (", " .. tostring(err)))
 end
 
 -- The class default object of a Blueprint class: the field first, then the Default__ path.
@@ -457,6 +470,27 @@ local function HookHeavy(name)
 end
 
 ---------------------------------------------------------------------------------------------------------------------
+-- Block-parry perfect window
+---------------------------------------------------------------------------------------------------------------------
+
+-- This is the block parry's perfect window, not the weapon clash's: the clash has no global window field, its
+-- frames live in each attack asset. Every difficulty has its own copy of the combat config, so all are written.
+local deflectWindowTuned = false
+
+local function TuneDeflectWindow()
+    if deflectWindowTuned or Settings.DeflectWindowFrames <= 0 then return end
+    local configs = safe(FindAllOf, COMBAT_CONFIG_CLASS)
+    if not configs or #configs == 0 then return end
+    deflectWindowTuned = true
+    for _, config in ipairs(configs) do
+        if valid(config) then
+            LogEvent("deflect window on %s", FullName(config))
+            WriteNumber(config, "Deflect Perfect Window Frames", Settings.DeflectWindowFrames)
+        end
+    end
+end
+
+---------------------------------------------------------------------------------------------------------------------
 -- Loops
 ---------------------------------------------------------------------------------------------------------------------
 
@@ -465,6 +499,7 @@ local function Tick()
     for _, name in ipairs(HEAVY_CLASSES) do
         HookHeavy(name)
     end
+    TuneDeflectWindow()
 end
 
 local function TickSafe()

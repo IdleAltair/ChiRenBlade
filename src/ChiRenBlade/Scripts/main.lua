@@ -1,7 +1,7 @@
 local UEHelpers = require("UEHelpers")
 
 local MOD = "ChiRenBlade"
-local VERSION = "0.84"
+local VERSION = "0.90"
 
 local DEFAULTS = {
     Charges = 6,
@@ -200,6 +200,8 @@ local fireAppliedAt = nil
 -- mod's short clash fire, so the anti-stacking guard has to follow the real end time.
 local fireUntil = nil
 local fireAskedSeconds = nil
+local fireReapplyAt = nil
+local TryFire
 -- FireStateGE is a class; its default object holds the duration that the effect copies on apply.
 local fireCdo = nil
 
@@ -259,11 +261,26 @@ local function CheckBurning()
     if count ~= lastBurning then
         lastBurning = count
         if count == 0 and fireAppliedAt then
-            LogEvent("fire lasted %.2f s (last target %.1f)", os.clock() - fireAppliedAt,
-                fireAskedSeconds or Settings.FireSeconds)
-            fireAppliedAt = nil
-            fireUntil = nil
-            fireAskedSeconds = nil
+            local now = os.clock()
+            local untilAt = fireUntil or (fireAppliedAt + Settings.FireSeconds)
+            if now < untilAt then
+                -- A hit clears the temporary fire state. Put it back for the rest of the window so
+                -- FireSeconds still means what the setting says, but rate-limit the retries.
+                if now - (fireReapplyAt or 0) >= 1.0 then
+                    fireReapplyAt = now
+                    local remaining = math.max(0.5, untilAt - now)
+                    if type(TryFire) == "function" then
+                        TryFire(true, remaining)
+                    end
+                    LogEvent("fire: cleared by a hit, reapplied %.1f s", remaining)
+                end
+            else
+                LogEvent("fire lasted %.2f s (last target %.1f)", now - fireAppliedAt,
+                    fireAskedSeconds or Settings.FireSeconds)
+                fireAppliedAt = nil
+                fireUntil = nil
+                fireAskedSeconds = nil
+            end
         end
         LogEvent("burning=%s at %.1f (shachi=%s)", tostring(count), os.clock(), tostring(PlayerShachi()))
     end
@@ -314,17 +331,19 @@ local function ResolveFireGe()
     return nil
 end
 
-local function TryFire()
+TryFire = function(force, duration)
     if not Settings.FireEnabled then
         return
     end
+    local applySeconds = duration or Settings.FireSeconds
     -- Each clash used to stack another independent GE instance, which multiplies the fire damage;
     -- a long fight reached dozens of layers. A new layer is only applied after the current one has
-    -- fully expired, so the player never carries more than one mod layer.
+    -- fully expired, so the player never carries more than one mod layer. `force` is the reapply
+    -- after a hit cleared the state; it keeps the original window end.
     if fireAppliedAt then
         local now = os.clock()
         local untilAt = fireUntil or (fireAppliedAt + Settings.FireSeconds)
-        if now < untilAt then
+        if now < untilAt and not force then
             LogEvent("fire: still burning, skipped")
             return
         end
@@ -366,7 +385,7 @@ local function TryFire()
     local originalCalc = readField(magnitude, "MagnitudeCalculationType")
     local originalValue = safe(function() return magnitude.ScalableFloatMagnitude.Value end)
     local setCalc, calcError = pcall(function() magnitude.MagnitudeCalculationType = 0 end)
-    local setValue, valueError = pcall(function() magnitude.ScalableFloatMagnitude.Value = Settings.FireSeconds end)
+    local setValue, valueError = pcall(function() magnitude.ScalableFloatMagnitude.Value = applySeconds end)
     if not setCalc then
         LogEvent("fire: could not switch the duration calculation (%s)", tostring(calcError))
     end
@@ -383,10 +402,14 @@ local function TryFire()
         pcall(function() magnitude.ScalableFloatMagnitude.Value = originalValue end)
     end
     if ok then
-        fireAppliedAt = os.clock()
-        fireUntil = fireAppliedAt + Settings.FireSeconds
-        fireAskedSeconds = Settings.FireSeconds
-        LogEvent("fire: applied, asked %.1f s", Settings.FireSeconds)
+        if force then
+            LogEvent("fire: reapplied for %.1f s", applySeconds)
+        else
+            fireAppliedAt = os.clock()
+            fireUntil = fireAppliedAt + applySeconds
+            fireAskedSeconds = applySeconds
+            LogEvent("fire: applied, asked %.1f s", applySeconds)
+        end
     else
         LogEvent("fire: BP_ApplyGameplayEffectToSelf failed (%s)", tostring(err))
     end
@@ -550,6 +573,30 @@ local function SkipHitreact(name, context, ...)
         hitreactSkipped = hitreactSkipped + 1
         LogEvent("invuln: hitreact during window %s (%d) args=%d anim=%s", name, hitreactSkipped,
             select("#", ...), AnimationOf(self))
+    end
+    -- A hit clears the temporary fire state. Reapply it immediately (rate-limited) instead of
+    -- waiting for the 300 ms burning sample, so the FireSeconds window is covered except for the
+    -- hit frame itself. The 1.2 s invulnerability only protects the first part of that window.
+    if isPlayer and fireAppliedAt then
+        local now = os.clock()
+        local untilAt = fireUntil or (fireAppliedAt + Settings.FireSeconds)
+        if now < untilAt and now - (fireReapplyAt or 0) >= 1.0 then
+            local pawn = GetPlayerPawn()
+            local abilities = valid(pawn) and readField(pawn, "AbilitySystemComponent") or nil
+            if valid(abilities) then
+                local count = safe(function()
+                    return abilities:GetGameplayTagCount({ TagName = BURNING_FNAME })
+                end)
+                if count == 0 then
+                    fireReapplyAt = now
+                    local remaining = math.max(0.5, untilAt - now)
+                    if type(TryFire) == "function" then
+                        TryFire(true, remaining)
+                    end
+                    LogEvent("fire: hit cleared it, reapplied %.1f s", remaining)
+                end
+            end
+        end
     end
     -- Sample the attacker's own reaction so the interrupt can later play the same animation.
     if not isPlayer and hitreactLogs < 20 then
@@ -1411,15 +1458,20 @@ local function GrantCharges(reason, isBlock)
         return
     end
     lastClash = now
+    if isBlock then
+        -- A block also consumes a deflect frame, but it is not a clash. It used to grant the full
+        -- reward here, which made repeated blocks light the blade and refresh the free attacks.
+        LogEvent("clash skipped (block): %s", reason)
+        TryBreakClash(true, reason)
+        return
+    end
     charges = Settings.Charges
     LogEvent("clash (%s): %d free heavy attacks", reason, charges)
     TryFire()
     TryInvulnerable()
-    if not isBlock then
-        tornadoCombo = math.min(tornadoCombo + 1, Settings.TornadoClashMax)
-        LogEvent("tornado combo: %d/%d", tornadoCombo, Settings.TornadoClashMax)
-    end
-    TryBreakClash(isBlock, reason)
+    tornadoCombo = math.min(tornadoCombo + 1, Settings.TornadoClashMax)
+    LogEvent("tornado combo: %d/%d", tornadoCombo, Settings.TornadoClashMax)
+    TryBreakClash(false, reason)
 end
 
 ---------------------------------------------------------------------------------------------------------------------
@@ -1982,16 +2034,8 @@ end
 local costScaleLogged = false
 local heavyActivateLogs = 0
 
-local function HookHeavy(name)
-    if hookedHeavy[name] then return end
-    local objects = safe(FindAllOf, name)
-    if not objects or #objects == 0 then return end
-    local classPath = classPathOf(objects[1])
-    if not classPath then return end
-    hookedHeavy[name] = true
-    local ok, err = pcall(RegisterHook, classPath .. ":K2_ActivateAbility", function(context)
-        local self = Unwrap(context)
-        if not valid(self) then return end
+local function HeavyActivate(name, self, classPath)
+    if not valid(self) then return end
         lastAttackAt = os.clock()
         NoteAction(name)
         if heavyActivateLogs < 200 then
@@ -2054,11 +2098,64 @@ local function HookHeavy(name)
         if before ~= nil and not freeAttack then
             ScheduleShachiRefund(before)
         end
+end
+
+local function HookHeavy(name)
+    if hookedHeavy[name] then return end
+    local objects = safe(FindAllOf, name)
+    if not objects or #objects == 0 then return end
+    local classPath = classPathOf(objects[1])
+    if not classPath then return end
+    hookedHeavy[name] = true
+    local ok, err = pcall(RegisterHook, classPath .. ":K2_ActivateAbility", function(context)
+        HeavyActivate(name, Unwrap(context), classPath)
     end)
     if ok then
         LogEvent("hooked heavy %s", name)
     else
         logError("heavy hook " .. name .. ": " .. tostring(err))
+        if name == "GA_Hun_ChiRen_B_C" or name == "GA_Hun_ChiRen_BBB_C" then
+            local classObj = safe(function() return objects[1]:GetClass() end)
+            local parent = valid(classObj) and readField(classObj, "SuperStruct") or nil
+            if valid(parent) then
+                local parentPath = safe(function()
+                    return parent:GetFullName():gsub("^Class ", "")
+                end)
+                if parentPath then
+                    local pOk, pErr = pcall(RegisterHook, parentPath .. ":K2_ActivateAbility",
+                        function(context)
+                            local self = Unwrap(context)
+                            if valid(self) and FullName(self):find("GA_Hun_ChiRen_", 1, true) then
+                                HeavyActivate(name, self, classPath)
+                            end
+                        end)
+                    LogEvent("heavy probe %s parent=%s hook ok=%s%s", name, parentPath,
+                        tostring(pOk), pOk and "" or (" err=" .. tostring(pErr)))
+                    if not pOk then
+                        -- BP_B_Base_C / BP_BBB_Base_C are empty; the event graph is one level up.
+                        local grand = readField(parent, "SuperStruct")
+                        if valid(grand) then
+                            local grandPath = safe(function()
+                                return grand:GetFullName():gsub("^Class ", "")
+                            end)
+                            if grandPath then
+                                local gOk, gErr = pcall(RegisterHook,
+                                    grandPath .. ":K2_ActivateAbility", function(context)
+                                        local self = Unwrap(context)
+                                        if valid(self) and FullName(self):find(name, 1, true) then
+                                            HeavyActivate(name, self, classPath)
+                                        end
+                                    end)
+                                LogEvent("heavy probe %s grandparent=%s hook ok=%s%s", name, grandPath,
+                                    tostring(gOk), gOk and "" or (" err=" .. tostring(gErr)))
+                            end
+                        end
+                    end
+                end
+            else
+                LogEvent("heavy probe %s has no SuperStruct", name)
+            end
+        end
     end
     if name == "GA_Hun_ChiRen_BSup_C" then
         local okEnd, errEnd = pcall(RegisterHook, classPath .. ":K2_OnEndAbility", function(context)

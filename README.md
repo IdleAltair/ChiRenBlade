@@ -16,9 +16,11 @@ Made with game build `26367565` (Steam) and UE4SS `v3.0.1-1195-g1ceefac8` (the c
 - **Free heavy attacks after a clash.** The player's deflect component (`DeflectComponent:ConsumeReceivedFrame`)
   is the trigger. After a clash, the next `Charges` heavy attacks (the Y-button Shachi attacks, `GA_Hun_ChiRen_B*`)
   cost no Shachi. The cost is written to `0` on the ability instance right before it activates, so nothing is
-  patched permanently.
+  patched permanently. All heavy segments are covered, including the first (B) and third (BBB), whose activation
+  comes from their shared base ability.
 - **Fire on the blade.** The clash applies the weapon's own `GE_ChiRen_FireState` for `FireSeconds`. The original
-  blade-energy fire is a separate effect instance and is not changed.
+  blade-energy fire is a separate effect instance and is not changed. If a hit clears the fire, it is reapplied
+  within the same `FireSeconds` window (rate-limited to once per second).
 - **Short invulnerability.** Each clash applies the game's own `GE_PBZSpecialMoveInvulnerable_C` for
   `InvulnSeconds` (1.2 s). The optional health guard (`HealthGuard`, off by default) writes the player's health
   back every 16 ms during the window as a fallback; with the game effect alone the window is already invulnerable.
@@ -48,7 +50,7 @@ Made with game build `26367565` (Steam) and UE4SS `v3.0.1-1195-g1ceefac8` (the c
    The stock UE4SS does not work with this game.
 2. Copy the `ChiRenBlade` folder into `<game>\platform\steam\ue4ss\Mods\`.
 3. Start the game. The mod writes its log to `<game>\platform\steam\ue4ss\UE4SS.log`; the first line is
-   `[ChiRenBlade] 0.84 loaded`.
+   `[ChiRenBlade] 0.90 loaded`.
 
 The folder holds `enabled.txt`, so UE4SS starts the mod without an entry in `mods.txt`.
 
@@ -135,10 +137,12 @@ return {
 ## Log lines
 
 ```
-[ChiRenBlade] 0.84 loaded
+[ChiRenBlade] 0.90 loaded
 [ChiRenBlade] hooked ConsumeReceivedFrame
+[ChiRenBlade] clash skipped (block): deflect frame consumed
 [ChiRenBlade] clash (deflect frame consumed): 6 free heavy attacks
 [ChiRenBlade] fire: applied, asked 5.0 s
+[ChiRenBlade] fire: cleared by a hit, reapplied 4.2 s
 [ChiRenBlade] invuln: applied 1.2 s
 [ChiRenBlade] free heavy: GA_Hun_ChiRen_BB_C (5 left)
 [ChiRenBlade] tornado combo: 4/6
@@ -158,7 +162,8 @@ return {
   so a clash with another weapon fills the charge count and the break meter; those charges are spent on the next
   ChiRen heavy attack.
 - The fire is an extra effect instance on top of the game's own fire. Both run and expire independently.
-- The clash trigger is the deflect component, not the parry ability. Blocks do not build the break meter.
+- The clash trigger is the deflect component, not the parry ability. A block consumes a deflect frame but does not
+  grant any reward: no free attacks, no fire, no invulnerability, and no break meter.
 - The refund is a post-charge correction: the bar drops first, then the kept part is written back within about a
   second. It is not an instantaneous discount.
 - The whirlwind multiplier only applies to the two BSup bullets. The Shachi-cost whirlwind variant `C` keeps its
@@ -202,9 +207,11 @@ collaborators.
 
 - **拼刀后免杀气。** 玩家的弹刀组件 `DeflectComponent:ConsumeReceivedFrame` 被消费时算一次拼刀。之后
   接下来 `Charges` 次重攻击（Y 键的 B 系：`GA_Hun_ChiRen_B / BB / BBB / BD / BSup / C`）不消耗杀气。
-  做法是在技能激活前把实例上的 `Shachi Cost` 和 `Shachi Cost Min` 写成 0，不永久改资产。
+  做法是在技能激活前把实例上的 `Shachi Cost` 和 `Shachi Cost Min` 写成 0，不永久改资产。第一段 B 和
+  第三段 BBB 通过它们的公共父类一起覆盖。
 - **刀上火。** 拼刀同时施加武器自己的 `GE_ChiRen_FireState`，持续 `FireSeconds` 秒。原版攒满刀劲的
-  15 秒火焰是另一个独立实例，两者不会互相刷新或缩短。
+  15 秒火焰是另一个独立实例，两者不会互相刷新或缩短。火被受击或临时效果清掉时，会在同一个
+  `FireSeconds` 窗口内自动补火（每秒最多一次）。
 - **短暂无敌。** 每次拼刀施加游戏自己的 `GE_PBZSpecialMoveInvulnerable_C`，持续 `InvulnSeconds`（1.2 秒）。
   `HealthGuard` 默认关闭；打开后会在无敌窗口内每 16ms 把血量写回起始值，作为游戏效果之外的兜底。
 - **风回云卷增伤。** 每次 `GA_Hun_ChiRen_BSup_C` 释放时临时改两颗子弹的 `PhysicalDamage` 和 `ElementDamage`，
@@ -229,7 +236,7 @@ collaborators.
    原版 UE4SS 不适用于这个游戏。
 2. 把 `ChiRenBlade` 文件夹放进 `<游戏目录>\platform\steam\ue4ss\Mods\`。
 3. 启动游戏。日志写在 `<游戏目录>\platform\steam\ue4ss\UE4SS.log`，第一行应为
-   `[ChiRenBlade] 0.84 loaded`。
+   `[ChiRenBlade] 0.90 loaded`。
 
 文件夹里带有 `enabled.txt`，不需要在 `mods.txt` 里登记。
 
@@ -268,9 +275,11 @@ collaborators.
 ### 日志示例
 
 ```
-[ChiRenBlade] 0.84 loaded
+[ChiRenBlade] 0.90 loaded
+[ChiRenBlade] clash skipped (block): deflect frame consumed
 [ChiRenBlade] clash (deflect frame consumed): 6 free heavy attacks
 [ChiRenBlade] invuln: applied 1.2 s
+[ChiRenBlade] fire: cleared by a hit, reapplied 4.2 s
 [ChiRenBlade] tornado combo: 4/6
 [ChiRenBlade] tornado cast: streak=4 tier=3 multiplier=x4.00 free=true
 [ChiRenBlade] damage hit: 2410 GA_Hun_ChiRen_BSup_C x4.00 on BP_Monster_YuBi_C
@@ -283,7 +292,8 @@ collaborators.
 - mod 只改炽刃；其他武器的伤害和动作不变。拼刀触发不检查武器，所以用其他武器拼刀也会攒免耗次数和打断架势，
   免耗次数会在下一次炽刃重攻击时用掉。
 - 火焰是额外的一层效果，与原版刀劲火各自计时、互不刷新。
-- 拼刀触发是弹刀组件的判定，不是格挡弹反技能；格挡不会攒打断架势。
+- 拼刀触发是弹刀组件的判定，不是格挡弹反技能。格挡也会消费弹刀帧，但不发任何奖励：不免耗、不点火、
+  不给无敌、也不攒打断架势。
 - 杀气减半是扣后回补，杀气条会先掉再回，不是瞬时折扣。
 - 龙卷倍率只作用于两颗 BSup 子弹；耗杀气的 `C` 变体保持原版伤害，但同样有 2.5 秒无敌。
 - 打断用的是游戏原生 Break 受击，未满阈值时敌人继续正常行动。

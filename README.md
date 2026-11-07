@@ -170,15 +170,6 @@ return {
   vanilla damage but still gets the 2.5 s invulnerability.
 - The three-clash interrupt uses the game's native Break reaction. Below the threshold the enemy keeps acting.
 
-## Testing tools
-
-Development and testing used two extra tools that the mod itself does not require:
-
-- **PBZModLoader 1.0.2** (`version.dll`): loaded the temporary `chiren-probe` JavaScript probe used to read
-  ability state and hit reactions during development. It is not needed to play the mod.
-- **BossRushTrainer**: used to replay boss fights while testing. Its `Boss 免伤` switch locks a boss's health
-  and must be off when checking damage.
-
 ## Game data and research
 
 The `research/` folder contains the mapping file, the readable property schema, the scripts used to generate it,
@@ -306,14 +297,6 @@ collaborators.
 - 杀气减半是扣后回补，杀气条会先掉再回，不是瞬时折扣。
 - 龙卷倍率只作用于两颗 BSup 子弹；耗杀气的 `C` 变体保持原版伤害，但同样有 2.5 秒无敌。
 - 打断用的是游戏原生 Break 受击，未满阈值时敌人继续正常行动。
-
-### 测试工具
-
-开发和测试时还用了两个工具，它们不是 mod 的运行依赖：
-
-- **PBZModLoader 1.0.2**（`version.dll`）：用来加载临时的 `chiren-probe` JavaScript 探针，读取技能状态和
-  受击信息。普通游玩不需要。
-- **BossRushTrainer**：复战测试用。它的“Boss 免伤”会锁住 boss 血量，检查伤害时要关掉。
 
 ### 游戏资料与研究
 

@@ -183,7 +183,7 @@ one.
 
 ## Credits
 
-Written by Altair, with DeepSeek-V4.1-Flash-1017 (Qoder model selector), Gemini (哈基米) and Kimi (K3.1 Pro) as
+Written by Altair, with DeepSeek-V4.1-Flash-1017 (Qoder model selector), Gemini (Argon) and Kimi (K3.1 Pro) as
 collaborators.
 
 ## License

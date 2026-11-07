@@ -15,7 +15,7 @@
     powershell -ExecutionPolicy Bypass -File .\deploy.ps1
 
 .EXAMPLE
-    powershell -ExecutionPolicy Bypass -File .\deploy.ps1 -GameDir "D:\steam\steamapps\common\PBZ"
+    powershell -ExecutionPolicy Bypass -File .\deploy.ps1 -GameDir "<game folder>"
 #>
 param(
     [string]$GameDir,

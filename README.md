@@ -2,9 +2,12 @@
 
 [English](#chiren-blade) | [中文指南](#中文指南)
 
-A [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) Lua mod for Phantom Blade Zero (Unreal Engine 5.7): after a
-successful clash with the ChiRen blade, the next few heavy attacks cost no Shachi and the blade burns;
-independently of that, every heavy attack costs half the usual Shachi.
+A [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) Lua mod for Phantom Blade Zero (Unreal Engine 5.7).
+
+After a successful clash with the ChiRen blade the next heavy attacks cost no Shachi, the blade burns and the
+player gets a short invulnerability. Clashes also build a streak: the ChiRen whirlwind (风回云卷) deals 3–6× damage
+based on that streak, and a full three-clash meter interrupts the enemy with the game's own Break hit reaction.
+Independently, every heavy attack costs half the usual Shachi.
 
 Made with game build `26367565` (Steam) and UE4SS `v3.0.1-1195-g1ceefac8` (the custom build for this game).
 
@@ -12,20 +15,31 @@ Made with game build `26367565` (Steam) and UE4SS `v3.0.1-1195-g1ceefac8` (the c
 
 - **Free heavy attacks after a clash.** The player's deflect component (`DeflectComponent:ConsumeReceivedFrame`)
   is the trigger. After a clash, the next `Charges` heavy attacks (the Y-button Shachi attacks, `GA_Hun_ChiRen_B*`)
-  cost no Shachi. The cost is written to `0` on the ability instance right before it activates and restored on the
-  next attack, so nothing is patched permanently.
-- **Fire on the blade.** The clash also applies the weapon's own `GE_ChiRen_FireState` for `FireSeconds`. The
-  original blade-energy mechanic keeps its own 15-second fire; the two are separate effect instances and do not
-  shorten each other.
+  cost no Shachi. The cost is written to `0` on the ability instance right before it activates, so nothing is
+  patched permanently.
+- **Fire on the blade.** The clash applies the weapon's own `GE_ChiRen_FireState` for `FireSeconds`. The original
+  blade-energy fire is a separate effect instance and is not changed.
+- **Short invulnerability.** Each clash applies the game's own `GE_PBZSpecialMoveInvulnerable_C` for
+  `InvulnSeconds` (1.2 s). The optional health guard (`HealthGuard`, off by default) writes the player's health
+  back every 16 ms during the window as a fallback; with the game effect alone the window is already invulnerable.
+- **Whirlwind damage.** Every `GA_Hun_ChiRen_BSup_C` cast patches the two attack bullets' `PhysicalDamage` and
+  `ElementDamage` while the move runs and restores them afterwards. The multiplier is
+  `max(TornadoClashMin, min(streak, TornadoClashMax)) × TornadoDamageScale`: 3–6× by default, with at most six
+  stored clashes. The second cast of a double cast reuses the first cast's multiplier for 4 seconds. Every cast
+  also gets 2.5 s of invulnerability and starts or extends a 15 s fire.
+- **Three-clash interrupt.** Every non-block clash adds one point to that enemy's break meter. At `BreakThreshold`
+  (3) the mod plays the game's own `BP_DeflectHitreactAttackSource_Break_C` on the enemy's hitreact component, so
+  the hit reaction, animation and exit all run natively (about 1.0–1.8 s). `BreakHoldSeconds` keeps the target in
+  the reaction if a normal hit knocks it out early (at most two replays).
 - **Permanent half cost.** `HeavyCostScale` (0.5 by default) halves the Shachi every ChiRen heavy attack costs. The
   game does not read the ability's `Shachi Cost` fields nor the `HeavyAttack_ShachiCostReduction` attribute, so the
   mod watches the Shachi bar for about a second after each non-free heavy attack and refunds the part the scale
-  removes. The log line is `refund ... spent ... kept ...`.
-- **Independent switches.** The refund, the fire and the cost scale are separate: set `FireEnabled = false` and the
-  free heavy attacks still work.
+  removes.
 - **Optional block-parry window.** `DeflectWindowFrames` (off by default) raises the perfect window of the block
   parry, the game setting `Deflect Perfect Window Frames` (6 frames at 30 fps, 0.2 s). This is not the weapon
   clash's window.
+- **Damage log.** With `LogDamage = true` the mod samples the nearest enemy's health and writes `damage hit` /
+  `action damage` lines, plus a low-frequency `damage watch` line with the target and its current HP.
 
 ## Install
 
@@ -34,26 +48,38 @@ Made with game build `26367565` (Steam) and UE4SS `v3.0.1-1195-g1ceefac8` (the c
    The stock UE4SS does not work with this game.
 2. Copy the `ChiRenBlade` folder into `<game>\platform\steam\ue4ss\Mods\`.
 3. Start the game. The mod writes its log to `<game>\platform\steam\ue4ss\UE4SS.log`; the first line is
-   `[ChiRenBlade] 0.31 loaded`.
+   `[ChiRenBlade] 0.84 loaded`.
 
 The folder holds `enabled.txt`, so UE4SS starts the mod without an entry in `mods.txt`.
 
 ## Configuration
 
-Edit `ChiRenBlade\Scripts\config.lua`. The file is independent of `main.lua`, so it survives mod updates: a
-setting that is missing, has the wrong type, or is outside its range keeps the built-in default, and the log says
-so. Restart the game after a change.
+Edit `ChiRenBlade\Scripts\config.lua`. The file is independent of `main.lua`, so it survives mod updates: a setting
+that is missing, has the wrong type, or is outside its range keeps the built-in default, and the log says so.
+Restart the game after a change.
 
 | Setting | Default | Range | Meaning |
 | --- | --- | --- | --- |
-| `Charges` | `6` | 0-20 | How many heavy attacks cost no Shachi after a clash (`0` turns the refund off). |
+| `Charges` | `6` | 0-20 | Heavy attacks that cost no Shachi after a clash. |
 | `FireEnabled` | `true` | - | Apply the fire effect after a clash. |
-| `FireSeconds` | `5` | 0.5-30 | How long the mod's fire burns. The game's own 15-second fire from full blade energy is not touched. |
+| `FireSeconds` | `5` | 0.5-30 | Duration of the mod's fire. |
 | `CooldownSeconds` | `0.6` | 0-2 | Debounce between two clash triggers, in seconds. |
 | `TriggerOnDeflect` | `true` | - | Use the deflect component as the clash trigger. |
-| `HeavyCostScale` | `0.5` | 0.05-1.0 | Permanent scale for the heavy attack cost (`0.5` = half, `1.0` = off). Implemented as a refund after the charge, because the game ignores the ability's cost fields. |
-| `DeflectWindowFrames` | `0` | 0-60 | Perfect window of the **block parry**, in frames at 30 fps (game value 6). Not the weapon clash. Written to every difficulty. `0` = no change. |
+| `HeavyCostScale` | `0.5` | 0.05-1.0 | Permanent heavy-attack cost scale (`1.0` = off), implemented as a refund after the charge. |
+| `DeflectWindowFrames` | `0` | 0-60 | Perfect window of the **block parry** in frames at 30 fps (game value 6). Not the weapon clash. `0` = no change. |
+| `InvulnSeconds` | `1.2` | 0-5 | Game invulnerability applied after a clash. `0` = off. |
+| `HealthGuard` | `false` | - | 16 ms health write-back during the invulnerability window. Fallback only; leave off unless the game effect lets damage through. |
+| `TornadoInvulnSeconds` | `2.5` | 0-5 | Invulnerability applied by a whirlwind cast. |
+| `TornadoClashMin` | `3` | 1-6 | Lower end of the whirlwind damage multiplier. |
+| `TornadoClashMax` | `6` | 3-10 | Highest stored clash streak; also the upper end of the multiplier. |
+| `TornadoDamageScale` | `1.0` | 1.0-3.0 | Extra multiplier on top of the streak. |
+| `TornadoDamageSeconds` | `4.0` | 1.0-8.0 | Safety restore time for the patched bullet damage. |
+| `TornadoBurnSeconds` | `15` | 0-60 | Fire duration started or extended by a whirlwind cast. |
+| `BreakOnClash` | `true` | - | Enable the three-clash interrupt. |
+| `BreakThreshold` | `3` | 1-10 | Clashes needed to fill the break meter. |
+| `BreakHoldSeconds` | `1.2` | 0-3 | Keep the target in the Break reaction for this long; `0` = no replays. |
 | `LogEvents` | `true` | - | Write clash, free-attack, cost and fire lines to `UE4SS.log`. |
+| `LogDamage` | `true` | - | Write damage lines and sample the enemy's health. |
 
 A value outside its range keeps the default, and the log names the setting.
 
@@ -61,68 +87,89 @@ Example `config.lua`:
 
 ```lua
 return {
-    Charges = 5,
+    Charges = 6,
     FireEnabled = true,
-    FireSeconds = 6,
+    FireSeconds = 5,
     CooldownSeconds = 0.6,
     TriggerOnDeflect = true,
     HeavyCostScale = 0.5,
     DeflectWindowFrames = 0,
-    LogEvents = false,
+    InvulnSeconds = 1.2,
+    HealthGuard = false,
+    TornadoInvulnSeconds = 2.5,
+    TornadoClashMin = 3,
+    TornadoClashMax = 6,
+    TornadoDamageScale = 1.0,
+    TornadoDamageSeconds = 4.0,
+    TornadoBurnSeconds = 15,
+    BreakOnClash = true,
+    BreakThreshold = 3,
+    BreakHoldSeconds = 1.2,
+    LogEvents = true,
+    LogDamage = true,
 }
 ```
 
 ## How it works
 
 - **Clash trigger:** a pre-hook on `DeflectComponent:ConsumeReceivedFrame`, filtered to the player's pawn
-  (`BP_Renewal_Hun`). `CooldownSeconds` debounces the many frames a single clash produces.
-- **Free heavy attacks:** pre-hooks on `K2_ActivateAbility` of the ChiRen heavy abilities
-  (`GA_Hun_ChiRen_B`, `BB`, `BBB`, `BD`, `BSup`, `C`). While charges remain, `Shachi Cost` and `Shachi Cost Min`
-  on the instance are set to `0` and one charge is spent. With no charges left, the original values (cached on
-  the first activation) are written back scaled by `HeavyCostScale`.
-- **Fire duration:** `GE_ChiRen_FireState` takes its duration from a SetByCaller tag
-  (`SetByCaller.MainWeapon.ChiRen.FireStateDuration`), which `BP_ApplyGameplayEffectToSelf` cannot supply. The mod
-  reads the class default object of the effect, switches `DurationMagnitude` to a fixed value for the one apply,
-  and restores it immediately. `FireSeconds` is that value.
-- **Cost scale:** the ability's own fields and the `HeavyAttack_ShachiCostReduction` attribute are ignored by the
-  game's cost calculation. After each non-free heavy attack the mod samples `Shachi` at 80/160/260/400/600/850 ms
-  and, whenever it dropped, writes back the part `HeavyCostScale` keeps. A newer activation cancels the watchers
-  of the previous one.
-- **Deflect window:** `Deflect Perfect Window Frames` lives on the per-difficulty `PDA_GlobalCombatConfig_C` assets.
-  When `DeflectWindowFrames` is above `0` the mod writes it to all of them once, and the log prints the old and the
-  new value per difficulty.
-- **Loops:** UE4SS Delayed Action loops on the game thread (`LoopInGameThreadWithDelay`), 1.5 s for hook setup and
-  300 ms for the burning tag sampling.
+  (`BP_Renewal_Hun`). `CooldownSeconds` debounces the many frames a single clash produces. A block impact within
+  0.5 s is classified as a block and does not build the break meter.
+- **Free heavy attacks:** pre-hooks on `K2_ActivateAbility` of `GA_Hun_ChiRen_B`, `BB`, `BBB`, `BD`, `BSup`, `C`.
+  While charges remain, `Shachi Cost` and `Shachi Cost Min` on the instance are set to `0`.
+- **Fire duration:** `GE_ChiRen_FireState` takes its duration from a SetByCaller tag that
+  `BP_ApplyGameplayEffectToSelf` cannot supply. The mod switches the effect CDO's `DurationMagnitude` to a fixed
+  value for the one apply and restores it immediately.
+- **Invulnerability:** `GE_PBZSpecialMoveInvulnerable_C` is applied for the window and removed explicitly so an
+  infinite effect cannot stay on the player.
+- **Whirlwind damage:** the two `BD_GA_Hun_ChiRen_BSup_01/02` bullets' `Damage.Attack.Target.PhysicalDamage` and
+  `ElementDamage` are scaled, then restored at cast end (or after `TornadoDamageSeconds`). `AngerDamage` is not
+  touched.
+- **Break:** `StaticConstructObject` creates the game's `BP_DeflectHitreactAttackSource_Break_C`, and
+  `HitreactComponent:PlayHitreactToAvatar` plays it on the nearest enemy. The exit is the game's own.
+- **Cost scale:** after each non-free heavy attack the mod samples `Shachi` at 60/150/400 ms and writes back the
+  part `HeavyCostScale` keeps.
+- **Loops:** UE4SS delayed action loops on the game thread (`LoopInGameThreadWithDelay`), 1.5 s for hook setup and
+  300 ms for sampling.
 
 ## Log lines
 
 ```
-[ChiRenBlade] 0.31 loaded
+[ChiRenBlade] 0.84 loaded
 [ChiRenBlade] hooked ConsumeReceivedFrame
-[ChiRenBlade] hooked heavy GA_Hun_ChiRen_BB_C
-[ChiRenBlade] clash (deflect frame consumed): 3 free heavy attacks
+[ChiRenBlade] clash (deflect frame consumed): 6 free heavy attacks
 [ChiRenBlade] fire: applied, asked 5.0 s
-[ChiRenBlade] free heavy: GA_Hun_ChiRen_BB_C (2 left)
-[ChiRenBlade] heavy cost +60ms: 384 -> 384 (delta 0) consumed=168
+[ChiRenBlade] invuln: applied 1.2 s
+[ChiRenBlade] free heavy: GA_Hun_ChiRen_BB_C (5 left)
+[ChiRenBlade] tornado combo: 4/6
+[ChiRenBlade] tornado cast: streak=4 tier=3 multiplier=x4.00 free=true
+[ChiRenBlade] tornado damage: BD_GA_Hun_ChiRen_BSup_02 Damage.Attack.Target.PhysicalDamage 1.04 -> 4.18
+[ChiRenBlade] damage hit: 2410 GA_Hun_ChiRen_BSup_C x4.00 on BP_Monster_YuBi_C
+[ChiRenBlade] break meter full: ... (3/3); playing the native Break hitreact
+[ChiRenBlade] break source clash: ok=true state None -> CharacterState.HitReact.State.Break.Normal
+[ChiRenBlade] heavy cost +150ms: 384 -> 384 (delta 0) consumed=nil
 [ChiRenBlade] refund +400ms: spent 26, kept 13, wrote 198 ok=true
-[ChiRenBlade] fire lasted 5.12 s (asked 5.0)
-[ChiRenBlade] burning=0 at ...
+[ChiRenBlade] damage watch: BP_Monster_YuBi_C hp=139000
 ```
-
-`delta 0` with a `free heavy` line means the attack cost no Shachi. The `refund` lines are the cost scale at
-work: `spent` is what the game charged, `kept` is what the mod lets stay gone.
 
 ## Notes
 
-- The mod only affects the ChiRen blade; other weapons are untouched. The free attacks and the cost scale apply
-  only to the ChiRen heavy attacks. The clash trigger itself does not check the weapon, so a clash with another
-  weapon resets the charge count; those charges are spent on the next ChiRen heavy attack. `DeflectWindowFrames`
-  is the exception: it changes the global block-parry window and applies to every weapon.
-- The fire is an extra effect instance on top of the game's own fire. If the blade is already burning from full
-  blade energy, both run and expire independently.
-- The clash trigger is the deflect component, not the parry ability. Blocks are not required; a clash is.
+- The mod only affects the ChiRen blade; other weapons are untouched. The clash trigger does not check the weapon,
+  so a clash with another weapon fills the charge count and the break meter; those charges are spent on the next
+  ChiRen heavy attack.
+- The fire is an extra effect instance on top of the game's own fire. Both run and expire independently.
+- The clash trigger is the deflect component, not the parry ability. Blocks do not build the break meter.
 - The refund is a post-charge correction: the bar drops first, then the kept part is written back within about a
   second. It is not an instantaneous discount.
+- The whirlwind multiplier only applies to the two BSup bullets. The Shachi-cost whirlwind variant `C` keeps its
+  vanilla damage but still gets the 2.5 s invulnerability.
+- The three-clash interrupt uses the game's native Break reaction. Below the threshold the enemy keeps acting.
+
+## Game data and research
+
+The `research/` folder contains the mapping file, the readable property schema, the scripts used to generate it,
+and notes from runtime probing. See [research/README.md](research/README.md). These files are for mod authors who
+want to build on the same data; they are not needed to play.
 
 ## Deploy and pack
 
@@ -134,10 +181,20 @@ powershell -ExecutionPolicy Bypass -File .\pack.ps1        # dist\ChiRenBlade-<v
 `deploy.ps1` keeps an existing `Scripts\config.lua` in the game; `-ResetConfig` overwrites it with the shipped
 one.
 
+## Credits
+
+Written by Altair, with DeepSeek-V4.1-Flash-1017 (Qoder model selector), Gemini (哈基米) and Kimi (K3.1 Pro) as
+collaborators.
+
+## License
+
+[MIT](LICENSE)
+
 ## 中文指南
 
-炽刃专用的 UE4SS Lua mod，适用于《影之刃零》（UE 5.7）。核心是三条互相独立的改动：拼刀后给几次免杀气
-重攻击、给刀上火、以及永久降低重攻击的杀气消耗。另有一个可选的格挡弹反窗口调整，默认关闭。
+炽刃专用的 UE4SS Lua mod，适用于《影之刃零》（UE 5.7）。核心是拼刀后的奖励链：免杀气重攻击、刀上火、短暂
+无敌；拼刀还累积层数，风回云卷按层数造成 3–6 倍伤害，满 3 次拼刀用游戏原生 Break 受击打断敌人；此外每次
+重攻击的杀气消耗减半。
 
 游戏版本 `26367565`（Steam），配套的定制 UE4SS `v3.0.1-1195-g1ceefac8`。
 
@@ -145,14 +202,25 @@ one.
 
 - **拼刀后免杀气。** 玩家的弹刀组件 `DeflectComponent:ConsumeReceivedFrame` 被消费时算一次拼刀。之后
   接下来 `Charges` 次重攻击（Y 键的 B 系：`GA_Hun_ChiRen_B / BB / BBB / BD / BSup / C`）不消耗杀气。
-  做法是在技能激活前把实例上的 `Shachi Cost` 和 `Shachi Cost Min` 写成 0，用完后写回原值，不永久改资产。
+  做法是在技能激活前把实例上的 `Shachi Cost` 和 `Shachi Cost Min` 写成 0，不永久改资产。
 - **刀上火。** 拼刀同时施加武器自己的 `GE_ChiRen_FireState`，持续 `FireSeconds` 秒。原版攒满刀劲的
   15 秒火焰是另一个独立实例，两者不会互相刷新或缩短。
+- **短暂无敌。** 每次拼刀施加游戏自己的 `GE_PBZSpecialMoveInvulnerable_C`，持续 `InvulnSeconds`（1.2 秒）。
+  `HealthGuard` 默认关闭；打开后会在无敌窗口内每 16ms 把血量写回起始值，作为游戏效果之外的兜底。
+- **风回云卷增伤。** 每次 `GA_Hun_ChiRen_BSup_C` 释放时临时改两颗子弹的 `PhysicalDamage` 和 `ElementDamage`，
+  结束自动还原。倍率 = `max(TornadoClashMin, min(拼刀层数, TornadoClashMax)) × TornadoDamageScale`，
+  默认 3–6 倍，最多存 6 次拼刀；双发的第二发在 4 秒内沿用第一发倍率。每次释放还有 2.5 秒无敌，并施加或
+  延长 15 秒火焰。
+- **3 次拼刀打断。** 每次非格挡拼刀给该敌人加一层架势，满 `BreakThreshold`（3）时用游戏自己的
+  `BP_DeflectHitreactAttackSource_Break_C` 走 `HitreactComponent:PlayHitreactToAvatar`，受击、动画和退出
+  都是原生流程（约 1.0–1.8 秒）。`BreakHoldSeconds` 会在普通受击提前顶掉时补一次（最多重放两次）。
 - **永久杀气减半。** `HeavyCostScale` 默认 0.5。游戏不读技能自带的 Cost 字段，也不读
   `HeavyAttack_ShachiCostReduction` 属性，所以做法是「先扣后退」：每次非免耗重攻击激活后盯杀气条约一秒，
-  检测到下降就把倍率之外的部分写回去。日志里的 `refund ... spent ... kept ...` 就是这一步。
-- **可选格挡弹反窗口。** `DeflectWindowFrames` 默认 0（不改）。设成非 0 时，把全部 5 份难度配置的
+  检测到下降就把倍率之外的部分写回去。
+- **可选格挡弹反窗口。** `DeflectWindowFrames` 默认 0（不改）。设成非 0 时，把全部难度配置的
   `Deflect Perfect Window Frames` 改成该值。注意这是**格挡弹反**的窗口，不是拼刀窗口。
+- **伤害日志。** `LogDamage = true` 时会采样最近敌人的血量，写 `damage hit` / `action damage`，并每 3 秒写
+  一条 `damage watch` 显示当前目标和血量。
 
 ### 安装
 
@@ -161,7 +229,7 @@ one.
    原版 UE4SS 不适用于这个游戏。
 2. 把 `ChiRenBlade` 文件夹放进 `<游戏目录>\platform\steam\ue4ss\Mods\`。
 3. 启动游戏。日志写在 `<游戏目录>\platform\steam\ue4ss\UE4SS.log`，第一行应为
-   `[ChiRenBlade] 0.31 loaded`。
+   `[ChiRenBlade] 0.84 loaded`。
 
 文件夹里带有 `enabled.txt`，不需要在 `mods.txt` 里登记。
 
@@ -174,57 +242,56 @@ one.
 
 | 参数 | 默认 | 范围 | 作用 |
 | --- | --- | --- | --- |
-| `Charges` | `6` | 0-20 | 拼刀后多少次重攻击免杀气。按技能**激活**计数，不是命中；一套 B→BB→BBB 按三下算 3 次。`0` = 关闭免耗（火焰不受影响）。 |
+| `Charges` | `6` | 0-20 | 拼刀后多少次重攻击免杀气。按技能**激活**计数，不是命中；`0` = 关闭免耗（火焰不受影响）。 |
 | `FireEnabled` | `true` | - | 拼刀后是否给刀上火。 |
-| `FireSeconds` | `5` | 0.5-30 | mod 施加的火焰持续几秒。原版攒满刀劲的 15 秒火不受影响。 |
-| `CooldownSeconds` | `0.6` | 0-2 | 一次拼刀会连续触发很多帧，这个窗口用来去重。设太大可能吞掉紧挨着的第二次拼刀。 |
-| `TriggerOnDeflect` | `true` | - | 用玩家的弹刀组件作为拼刀触发点。关掉后免耗和火都不会触发，一般只用于排查。 |
-| `HeavyCostScale` | `0.5` | 0.05-1.0 | 重攻击杀气的永久倍率。`0.5` = 半价，`1.0` = 关闭。实现是扣后回补，所以杀气条会先掉再回。与「正气凌然」（-30%）叠加时约为原价的 35%。 |
-| `DeflectWindowFrames` | `0` | 0-60 | **格挡弹反**的完美窗口帧数（30 fps），游戏原值 6 即 0.2 秒。`0` = 不改。会写入全部 5 份难度。不是拼刀窗口。 |
+| `FireSeconds` | `5` | 0.5-30 | mod 施加的火焰持续几秒。 |
+| `CooldownSeconds` | `0.6` | 0-2 | 一次拼刀会连续触发很多帧，这个窗口用来去重。 |
+| `TriggerOnDeflect` | `true` | - | 用玩家的弹刀组件作为拼刀触发点。 |
+| `HeavyCostScale` | `0.5` | 0.05-1.0 | 重攻击杀气的永久倍率。`1.0` = 关闭；实现是扣后回补。 |
+| `DeflectWindowFrames` | `0` | 0-60 | **格挡弹反**的完美窗口帧数（30 fps），游戏原值 6。`0` = 不改。 |
+| `InvulnSeconds` | `1.2` | 0-5 | 拼刀后的游戏无敌秒数。`0` = 关闭。 |
+| `HealthGuard` | `false` | - | 无敌窗口内每 16ms 写回血量。只在游戏无敌漏伤害时才需要打开。 |
+| `TornadoInvulnSeconds` | `2.5` | 0-5 | 风回云卷释放时的无敌秒数。 |
+| `TornadoClashMin` | `3` | 1-6 | 龙卷倍率的下限。 |
+| `TornadoClashMax` | `6` | 3-10 | 最多存储的拼刀层数，也是倍率上限。 |
+| `TornadoDamageScale` | `1.0` | 1.0-3.0 | 在层数之外再乘的倍率。 |
+| `TornadoDamageSeconds` | `4.0` | 1.0-8.0 | 子弹伤害替换的兜底还原时间。 |
+| `TornadoBurnSeconds` | `15` | 0-60 | 龙卷释放施加/延长的火焰秒数。 |
+| `BreakOnClash` | `true` | - | 是否启用 3 次拼刀打断。 |
+| `BreakThreshold` | `3` | 1-10 | 蓄满打断架势需要的拼刀次数。 |
+| `BreakHoldSeconds` | `1.2` | 0-3 | 维持 Break 受击的秒数；`0` = 不重放。 |
 | `LogEvents` | `true` | - | 是否把拼刀、免耗、杀气消耗和火焰时长写进 `UE4SS.log`。 |
+| `LogDamage` | `true` | - | 是否写伤害日志并采样敌人血量。 |
 
 范围外的值会保留默认值，日志会说明是哪一项。
-
-### 示例
-
-```lua
-return {
-    Charges = 6,
-    FireEnabled = true,
-    FireSeconds = 5,
-    CooldownSeconds = 0.6,
-    TriggerOnDeflect = true,
-    HeavyCostScale = 0.5,
-    DeflectWindowFrames = 0,   -- 想加长格挡弹反窗口就改这里，例如 12
-    LogEvents = true,
-}
-```
 
 ### 日志示例
 
 ```
-[ChiRenBlade] 0.31 loaded
-[ChiRenBlade] hooked ConsumeReceivedFrame
-[ChiRenBlade] hooked heavy GA_Hun_ChiRen_BB_C
-[ChiRenBlade] clash (deflect frame consumed): 3 free heavy attacks
-[ChiRenBlade] fire: applied, asked 5.0 s
-[ChiRenBlade] free heavy: GA_Hun_ChiRen_BB_C (2 left)
-[ChiRenBlade] heavy cost +60ms: 384 -> 384 (delta 0) consumed=168
-[ChiRenBlade] refund +400ms: spent 26, kept 13, wrote 198 ok=true
-[ChiRenBlade] fire lasted 5.12 s (asked 5.0)
+[ChiRenBlade] 0.84 loaded
+[ChiRenBlade] clash (deflect frame consumed): 6 free heavy attacks
+[ChiRenBlade] invuln: applied 1.2 s
+[ChiRenBlade] tornado combo: 4/6
+[ChiRenBlade] tornado cast: streak=4 tier=3 multiplier=x4.00 free=true
+[ChiRenBlade] damage hit: 2410 GA_Hun_ChiRen_BSup_C x4.00 on BP_Monster_YuBi_C
+[ChiRenBlade] break meter full: ... (3/3); playing the native Break hitreact
+[ChiRenBlade] damage watch: BP_Monster_YuBi_C hp=139000
 ```
-
-`delta 0` 且上面有 `free heavy` 行 = 这次攻击没花杀气。`refund` 行是杀气减半在工作：`spent` 是游戏实际
-扣掉的，`kept` 是 mod 允许留下的部分。
 
 ### 说明与限制
 
-- 免耗和杀气减半只作用于炽刃的重攻击，其他武器不受影响。拼刀触发本身不检查武器：用别的武器拼刀也会
-  重置免耗次数，次数会留到换回炽刃打重攻击时使用。`DeflectWindowFrames` 是例外，它改的是全局格挡弹反
-  窗口，对所有武器生效。
-- 火焰是额外的一层效果实例。刀本身已经因为刀劲充满在燃烧时，两层各烧各的、各自到期，不会互相覆盖。
-- 免耗的计数口径是**技能激活**，不是命中：被打断、状态不允许而没放出来时不扣次数。
-- 杀气减半不是即时折扣，而是扣后约一秒内补回；补回过程分几次采样，日志会逐条记录。
+- mod 只改炽刃；其他武器的伤害和动作不变。拼刀触发不检查武器，所以用其他武器拼刀也会攒免耗次数和打断架势，
+  免耗次数会在下一次炽刃重攻击时用掉。
+- 火焰是额外的一层效果，与原版刀劲火各自计时、互不刷新。
+- 拼刀触发是弹刀组件的判定，不是格挡弹反技能；格挡不会攒打断架势。
+- 杀气减半是扣后回补，杀气条会先掉再回，不是瞬时折扣。
+- 龙卷倍率只作用于两颗 BSup 子弹；耗杀气的 `C` 变体保持原版伤害，但同样有 2.5 秒无敌。
+- 打断用的是游戏原生 Break 受击，未满阈值时敌人继续正常行动。
+
+### 游戏资料与研究
+
+`research/` 目录放了映射文件、可读的属性表、生成脚本和运行时探测笔记，见
+[research/README.md](research/README.md)。这些是给继续改 mod 的人用的，普通游玩不需要。
 
 ### 部署与打包（开发者）
 
@@ -234,11 +301,3 @@ powershell -ExecutionPolicy Bypass -File .\pack.ps1        # 生成 dist\ChiRenB
 ```
 
 `deploy.ps1` 会保留游戏里已有的 `Scripts\config.lua`；加 `-ResetConfig` 则用发布的版本覆盖。
-
-## Credits
-
-Written by Altair with DeepSeek-V4.1-Flash-1017 in Qoder.
-
-## License
-
-[MIT](LICENSE)

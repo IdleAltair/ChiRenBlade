@@ -3,10 +3,12 @@
   "folder": "ChiRenBlade",
   "author": "Altair",
   "contributors": [
-    "DeepSeek-V4.1-Flash-1017 (Qoder model selector)"
+    "DeepSeek-V4.1-Flash-1017 (Qoder model selector)",
+    "Gemini (哈基米)",
+    "Kimi (K3.1 Pro)"
   ],
-  "version": "0.31",
-  "description": "After a successful clash with the ChiRen blade, the next heavy attacks cost no Shachi and the blade burns for a short while. Independently, every heavy attack costs half the usual Shachi.",
+  "version": "0.84",
+  "description": "After a successful clash with the ChiRen blade, the next heavy attacks cost no Shachi, the blade burns, and the player gets a short invulnerability. The ChiRen whirlwind (风回云卷) deals 3-6x damage based on the clash streak (up to six stored clashes) and starts or extends the fire; three clashes also interrupt the target with the game's native Break hit reaction. Independently, every heavy attack costs half the usual Shachi.",
   "kind": "ue4ss",
   "game": "phantombladezero",
   "gameFolder": "PBZ",

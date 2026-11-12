@@ -11,6 +11,7 @@ local DEFAULTS = {
     TriggerOnDeflect = true,
     HeavyCostScale = 0.5,
     DeflectWindowFrames = 0,
+    ClashWindowFrames = 0,
     InvulnSeconds = 1.2,
     HealthGuard = false,
     TornadoInvulnSeconds = 2.5,
@@ -150,6 +151,7 @@ local LIMITS = {
     CooldownSeconds = { 0, 2 },
     HeavyCostScale = { 0.05, 1.0 },
     DeflectWindowFrames = { 0, 60 },
+    ClashWindowFrames = { 0, 60 },
     InvulnSeconds = { 0, 5 },
     TornadoInvulnSeconds = { 0, 5 },
     TornadoClashMin = { 1, 6 },
@@ -2229,6 +2231,131 @@ local function TuneDeflectWindow()
 end
 
 ---------------------------------------------------------------------------------------------------------------------
+-- Weapon clash window (ChiRen heavy -> light counter)
+---------------------------------------------------------------------------------------------------------------------
+
+-- The clash has no global field: its window is the duration of the single GAA_DeflectFrame_C row in the
+-- counter ability's private Main timeline, written before the native timeline autoplay starts.
+-- Vanilla is 0.350606441 s, about 10.5 frames at 30 fps. Only the ChiRen blade is changed; any other
+-- long blade gets the vanilla value back.
+local CLASH_COUNTER_CLASS = "GA_Hun_Long_Counter_C"
+local CLASH_DEFLECT_CLASS = "GAA_DeflectFrame_C"
+local CLASH_ABILITY_BASE =
+    "/MagCombatAbilities/Abilities/BP_AbilityBase.BP_AbilityBase_C:K2_ActivateAbility"
+local CLASH_VANILLA_SECONDS = 0.35060644149780273
+local CLASH_MIN_SECONDS, CLASH_MAX_SECONDS = 0.01, 3.0
+local CLASH_FRAME_RATE = 30
+local CHIREN_WEAPON_PATH =
+    "/PBZCombatAsset/ActorData/Players/Hun/Weapon/Long/Weapon_Hun_ChiRen.Weapon_Hun_ChiRen"
+local CHIREN_EQUIP_TAG = "Weapon.Type.LongBlade.ChiRen"
+
+local clashWindowHooked = false
+local clashWindowRecords = {}
+local clashWindowLogs = 0
+local chirenWeaponAsset = nil
+
+-- nil = unknown: the weapon asset or its tag table is not loaded yet.
+local function ChiRenEquipped(ability)
+    if not valid(chirenWeaponAsset) then
+        chirenWeaponAsset = safe(StaticFindObject, CHIREN_WEAPON_PATH)
+    end
+    if not valid(chirenWeaponAsset) then return nil end
+    local asc = safe(function() return ability:GetAbilitySystemComponentFromActorInfo() end)
+    if not valid(asc) then return nil end
+    local tags = readField(chirenWeaponAsset, "Weapon Equip Tags")
+    if tags == nil then return nil end
+    local found, active = false, false
+    safe(function()
+        tags.GameplayTags:ForEach(function(_, ref)
+            local tag = ref:get()
+            local text = safe(function() return tag.TagName:ToString() end)
+            if text == CHIREN_EQUIP_TAG then
+                found = true
+                active = asc:HasMatchingGameplayTag(tag) == true
+            end
+        end)
+    end)
+    if not found then return nil end
+    return active
+end
+
+local function TuneClashWindow(context)
+    if Settings.ClashWindowFrames <= 0 then return end
+    local ability = Unwrap(context)
+    if not valid(ability) then return end
+    local className = safe(function() return ability:GetClass():GetFName():ToString() end)
+    if className ~= CLASH_COUNTER_CLASS then return end
+    local timeline = readField(ability, "Main")
+    if not valid(timeline) then return end
+    local row, count = nil, 0
+    safe(function()
+        timeline.Actions:ForEach(function(_, ref)
+            local candidate = ref:get()
+            local action = readField(candidate, "Action")
+            if valid(action) and FullName(action):find(CLASH_DEFLECT_CLASS, 1, true) then
+                row = candidate
+                count = count + 1
+            end
+        end)
+    end)
+    if count ~= 1 or row == nil then
+        if clashWindowLogs < 6 then
+            clashWindowLogs = clashWindowLogs + 1
+            LogEvent("clash window: expected one deflect row, found %d", count)
+        end
+        return
+    end
+    local current = readNumber(row, "duration")
+    if current == nil then
+        logError("clash window: the deflect row has no duration")
+        return
+    end
+    local key = tostring(timeline:GetAddress())
+    local record = clashWindowRecords[key]
+    local base
+    if record then
+        base = record.base
+    elseif math.abs(current - CLASH_VANILLA_SECONDS) < 0.0001 then
+        base = CLASH_VANILLA_SECONDS
+    else
+        base = current
+    end
+    local equipped = ChiRenEquipped(ability)
+    if equipped == nil then return end
+    local wanted = equipped and (Settings.ClashWindowFrames / CLASH_FRAME_RATE) or base
+    if wanted < CLASH_MIN_SECONDS then wanted = CLASH_MIN_SECONDS end
+    if wanted > CLASH_MAX_SECONDS then wanted = CLASH_MAX_SECONDS end
+    if math.abs(current - wanted) < 0.000001 then
+        clashWindowRecords[key] = { timeline = timeline, base = base }
+        return
+    end
+    local ok = pcall(function() row.duration = wanted end)
+    local after = readNumber(row, "duration")
+    if not ok or after == nil or math.abs(after - wanted) > 0.000001 then
+        logError(string.format("clash window: write rejected %.6f -> %.6f", current, wanted))
+        return
+    end
+    clashWindowRecords[key] = { timeline = timeline, base = base }
+    if clashWindowLogs < 12 then
+        clashWindowLogs = clashWindowLogs + 1
+        LogEvent("clash window %s: %.2f -> %.2f frames (%.6f -> %.6f s)", className,
+            current * CLASH_FRAME_RATE, after * CLASH_FRAME_RATE, current, after)
+    end
+end
+
+local function TryClashWindowHook()
+    if clashWindowHooked or Settings.ClashWindowFrames <= 0 then return end
+    local ok, err = pcall(RegisterHook, CLASH_ABILITY_BASE, TuneClashWindow)
+    if not ok then
+        logError("clash window hook: " .. tostring(err))
+        return
+    end
+    clashWindowHooked = true
+    LogEvent("clash window: hook ok (%d frames at %d fps; vanilla %.6f s)", Settings.ClashWindowFrames,
+        CLASH_FRAME_RATE, CLASH_VANILLA_SECONDS)
+end
+
+---------------------------------------------------------------------------------------------------------------------
 -- Probe: switch-weapon and deflect entry points (temporary, for the block-on-switch feature)
 ---------------------------------------------------------------------------------------------------------------------
 
@@ -2615,6 +2742,7 @@ local function Tick()
         HookAttack(name)
     end
     TuneDeflectWindow()
+    TryClashWindowHook()
     ProbeOnce()
     ProbeHitStateGes()
     ProbeAnimSets()

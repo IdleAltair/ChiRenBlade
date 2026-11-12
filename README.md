@@ -40,6 +40,10 @@ Made with game build `26367565` (Steam) and UE4SS `v3.0.1-1195-g1ceefac8` (the c
 - **Optional block-parry window.** `DeflectWindowFrames` (off by default) raises the perfect window of the block
   parry, the game setting `Deflect Perfect Window Frames` (6 frames at 30 fps, 0.2 s). This is not the weapon
   clash's window.
+- **Optional clash window.** `ClashWindowFrames` (off by default) widens the weapon clash window of the
+  heavy -> light counter (`GA_Hun_Long_Counter_C`) for the ChiRen blade. The clash has no global field: the
+  mod writes the duration of the counter's single `GAA_DeflectFrame_C` row before the native timeline
+  autoplay starts. Vanilla is 0.350606441 s (about 10.5 frames at 30 fps); other long blades are left alone.
 - **Damage log.** With `LogDamage = true` the mod samples the nearest enemy's health and writes `damage hit` /
   `action damage` lines, plus a low-frequency `damage watch` line with the target and its current HP.
 
@@ -69,6 +73,7 @@ Restart the game after a change.
 | `TriggerOnDeflect` | `true` | - | Use the deflect component as the clash trigger. |
 | `HeavyCostScale` | `0.5` | 0.05-1.0 | Permanent heavy-attack cost scale (`1.0` = off), implemented as a refund after the charge. |
 | `DeflectWindowFrames` | `0` | 0-60 | Perfect window of the **block parry** in frames at 30 fps (game value 6). Not the weapon clash. `0` = no change. |
+| `ClashWindowFrames` | `0` | 0-60 | Weapon **clash** window of the heavy -> light counter, in frames at 30 fps (vanilla 0.350606441 s, about 10.5). ChiRen only. `0` = no change. |
 | `InvulnSeconds` | `1.2` | 0-5 | Game invulnerability applied after a clash. `0` = off. |
 | `HealthGuard` | `false` | - | 16 ms health write-back during the invulnerability window. Fallback only; leave off unless the game effect lets damage through. |
 | `TornadoInvulnSeconds` | `2.5` | 0-5 | Invulnerability applied by a whirlwind cast. |
@@ -96,6 +101,7 @@ return {
     TriggerOnDeflect = true,
     HeavyCostScale = 0.5,
     DeflectWindowFrames = 0,
+    ClashWindowFrames = 0,
     InvulnSeconds = 1.2,
     HealthGuard = false,
     TornadoInvulnSeconds = 2.5,
@@ -226,6 +232,9 @@ collaborators.
   检测到下降就把倍率之外的部分写回去。
 - **可选格挡弹反窗口。** `DeflectWindowFrames` 默认 0（不改）。设成非 0 时，把全部难度配置的
   `Deflect Perfect Window Frames` 改成该值。注意这是**格挡弹反**的窗口，不是拼刀窗口。
+- **可选拼刀窗口。** `ClashWindowFrames` 默认 0（不改）。设成非 0 时，把「重击接轻击」派生拼刀
+  （`GA_Hun_Long_Counter_C`）里那条独立判定行 `GAA_DeflectFrame_C` 的时长改成该帧数（30fps 基准）。
+  原版 0.350606441 秒 ≈ 10.5 帧；只对炽刃生效，其他长兵保持原版。
 - **伤害日志。** `LogDamage = true` 时会采样最近敌人的血量，写 `damage hit` / `action damage`，并每 3 秒写
   一条 `damage watch` 显示当前目标和血量。
 
@@ -256,6 +265,7 @@ collaborators.
 | `TriggerOnDeflect` | `true` | - | 用玩家的弹刀组件作为拼刀触发点。 |
 | `HeavyCostScale` | `0.5` | 0.05-1.0 | 重攻击杀气的永久倍率。`1.0` = 关闭；实现是扣后回补。 |
 | `DeflectWindowFrames` | `0` | 0-60 | **格挡弹反**的完美窗口帧数（30 fps），游戏原值 6。`0` = 不改。 |
+| `ClashWindowFrames` | `0` | 0-60 | **拼刀**（重击接轻击派生）的判定窗口帧数（30fps），原版 0.350606441 秒 ≈ 10.5 帧。只对炽刃生效。`0` = 不改。 |
 | `InvulnSeconds` | `1.2` | 0-5 | 拼刀后的游戏无敌秒数。`0` = 关闭。 |
 | `HealthGuard` | `false` | - | 无敌窗口内每 16ms 写回血量。只在游戏无敌漏伤害时才需要打开。 |
 | `TornadoInvulnSeconds` | `2.5` | 0-5 | 风回云卷释放时的无敌秒数。 |

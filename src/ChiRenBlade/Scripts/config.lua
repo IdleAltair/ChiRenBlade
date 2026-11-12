@@ -44,6 +44,13 @@ return {
     -- 五个难度都会写入。0 = 不修改。
     DeflectWindowFrames = 0,
 
+    -- The weapon clash's own window: the heavy -> light counter (GA_Hun_Long_Counter_C) has one
+    -- GAA_DeflectFrame_C row, and its duration is the clash judgement window. In frames at 30 fps.
+    -- Vanilla is 0.350606441 s (about 10.5 frames). 0 = no change. ChiRen only.
+    -- 拼刀（重击接轻击派生）的判定窗口，单位是 30fps 下的帧数。原版 0.350606441 秒 ≈ 10.5 帧。
+    -- 不改则为 0，只影响炽刃。
+    ClashWindowFrames = 0,
+
     -- Seconds of the game's own dodge invulnerability applied after a clash (0-5). 0 = off.
     -- 拼刀后获得的无敌秒数（0-5），用的是游戏自己的闪避无敌效果。0 = 关闭。
     InvulnSeconds = 1.2,

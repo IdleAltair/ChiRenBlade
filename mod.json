@@ -9,7 +9,7 @@
     "Kimi (K3.1 Pro, support)"
   ],
   "version": "1.0",
-  "description": "After a successful clash with the ChiRen blade, the next heavy attacks cost no Shachi, the blade burns, and the player gets a short invulnerability. The ChiRen whirlwind (风回云卷) deals damage equal to the clash streak (1-6x by default, up to six stored clashes) and starts or extends the fire; three clashes also interrupt the target with the game's native Break hit reaction. Independently, every heavy attack costs half the usual Shachi. Blocks do not grant these rewards; fire is reapplied if a hit clears it.",
+  "description": "After a successful clash with the ChiRen blade, the next heavy attacks cost no Shachi, the blade burns, and the player gets a short invulnerability. The ChiRen whirlwind (风回云卷) deals damage equal to the clash streak (1-6x by default, up to six stored clashes) and starts or extends the fire; three clashes also interrupt the target with the game's native Break hit reaction. The ChiRen weapon-switch attack gains a native parry window at startup; a successful switch-parry grants the same rewards and blade stacks survive the swap. Independently, every heavy attack costs half the usual Shachi. Blocks do not grant these rewards; fire is reapplied if a hit clears it.",
   "kind": "ue4ss",
   "game": "phantombladezero",
   "gameFolder": "PBZ",

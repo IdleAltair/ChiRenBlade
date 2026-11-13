@@ -7,6 +7,8 @@ A [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) Lua mod for Phantom Blade Zero (
 After a successful clash with the ChiRen blade the next heavy attacks cost no Shachi, the blade burns and the
 player gets a short invulnerability. Clashes also build a streak: the ChiRen whirlwind (风回云卷) deals damage equal
 to that streak (1–6× by default), and a full three-clash meter interrupts the enemy with the game's own Break hit reaction.
+The ChiRen weapon-switch attack also gains a native parry window at startup; a successful switch-parry
+grants the same rewards, and blade stacks survive the swap.
 Independently, every heavy attack costs half the usual Shachi.
 
 Made with game build `26367565` (Steam) and UE4SS `v3.0.1-1195-g1ceefac8` (the custom build for this game).

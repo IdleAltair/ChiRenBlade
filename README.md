@@ -5,8 +5,8 @@
 A [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) Lua mod for Phantom Blade Zero (Unreal Engine 5.7).
 
 After a successful clash with the ChiRen blade the next heavy attacks cost no Shachi, the blade burns and the
-player gets a short invulnerability. Clashes also build a streak: the ChiRen whirlwind (风回云卷) deals 3–6× damage
-based on that streak, and a full three-clash meter interrupts the enemy with the game's own Break hit reaction.
+player gets a short invulnerability. Clashes also build a streak: the ChiRen whirlwind (风回云卷) deals damage equal
+to that streak (1–6× by default), and a full three-clash meter interrupts the enemy with the game's own Break hit reaction.
 Independently, every heavy attack costs half the usual Shachi.
 
 Made with game build `26367565` (Steam) and UE4SS `v3.0.1-1195-g1ceefac8` (the custom build for this game).
@@ -26,9 +26,11 @@ Made with game build `26367565` (Steam) and UE4SS `v3.0.1-1195-g1ceefac8` (the c
   back every 16 ms during the window as a fallback; with the game effect alone the window is already invulnerable.
 - **Whirlwind damage.** Every `GA_Hun_ChiRen_BSup_C` cast patches the two attack bullets' `PhysicalDamage` and
   `ElementDamage` while the move runs and restores them afterwards. The multiplier is
-  `max(TornadoClashMin, min(streak, TornadoClashMax)) × TornadoDamageScale`: 3–6× by default, with at most six
-  stored clashes. The second cast of a double cast reuses the first cast's multiplier for 4 seconds. Every cast
-  also gets 2.5 s of invulnerability and starts or extends a 15 s fire.
+  `max(TornadoClashMin, min(streak, TornadoClashMax)) × TornadoDamageScale`: the multiplier equals the clash streak
+  by default (1–6×, floor `TornadoClashMin` = 1), with at most six stored clashes. The second cast of a double cast
+  reuses the first cast's multiplier for 4 seconds. Every cast also gets 2.5 s of invulnerability and starts or
+  extends a 15 s fire. The optional `TornadoEasyCast` (off by default) tops the blade-force tier to Lv3 after a
+  clash so a single clash can cast the whirlwind; it fills the blade meter and may buff normal heavies before the cast.
 - **Three-clash interrupt.** Every non-block clash adds one point to that enemy's break meter. At `BreakThreshold`
   (3) the mod plays the game's own `BP_DeflectHitreactAttackSource_Break_C` on the enemy's hitreact component, so
   the hit reaction, animation and exit all run natively (about 1.0–1.8 s). `BreakHoldSeconds` keeps the target in
@@ -44,8 +46,19 @@ Made with game build `26367565` (Steam) and UE4SS `v3.0.1-1195-g1ceefac8` (the c
   heavy -> light counter (`GA_Hun_Long_Counter_C`) for the ChiRen blade. The clash has no global field: the
   mod writes the duration of the counter's single `GAA_DeflectFrame_C` row before the native timeline
   autoplay starts. Vanilla is 0.350606441 s (about 10.5 frames at 30 fps); other long blades are left alone.
-- **Damage log.** With `LogDamage = true` the mod samples the nearest enemy's health and writes `damage hit` /
-  `action damage` lines, plus a low-frequency `damage watch` line with the target and its current HP.
+- **Switch-attack parry.** The ChiRen switch attack (`GA_Hun_ChiRen_SWT_C`) ships with no deflect frame, so its
+  startup cannot parry. `SwitchDeflectInject` injects a native `GAA_DeflectFrame_C` row at start=0, giving it a
+  counter window like the heavy -> light counter. `SwitchDeflectFrames` sets the window, `SwitchDeflectAngle`
+  the front cone (120 default, 360 = all directions), and `SwitchDeflectRedEye` whether red-light attacks are
+  also parried (off by default). `SwitchKeepStacks` keeps the blade stacks across a switch. ChiRen only.
+- **Clash slow-motion (extra, off by default).** The vanilla clash already slows time briefly; with
+  `ClashSlowmoEnabled = true` the mod stacks another factor, slowing the whole world to `ClashSlowmoSpeed`
+  (30 %) for `ClashSlowmoSeconds` (0.4 s) of real time for stronger hit feedback; you slow with it. It uses
+  the engine's `DemoPlayTimeDilation` factor (not the game's `TimeDilation`), and real-time timing leaves the
+  invulnerability and fire windows unchanged. Only a clash triggers it (vanilla clash-parry and switch-parry
+  alike), not a held block.
+- **Damage log.** With `LogDamage = true` (off by default) the mod samples the nearest enemy's health and writes
+  `damage hit` / `action damage` lines, plus a low-frequency `damage watch` line with the target and its current HP.
 
 ## Install
 
@@ -54,7 +67,7 @@ Made with game build `26367565` (Steam) and UE4SS `v3.0.1-1195-g1ceefac8` (the c
    The stock UE4SS does not work with this game.
 2. Copy the `ChiRenBlade` folder into `<game>\platform\steam\ue4ss\Mods\`.
 3. Start the game. The mod writes its log to `<game>\platform\steam\ue4ss\UE4SS.log`; the first line is
-   `[ChiRenBlade] 0.90 loaded`.
+   `[ChiRenBlade] 1.0 loaded`.
 
 The folder holds `enabled.txt`, so UE4SS starts the mod without an entry in `mods.txt`.
 
@@ -74,19 +87,32 @@ Restart the game after a change.
 | `HeavyCostScale` | `0.5` | 0.05-1.0 | Permanent heavy-attack cost scale (`1.0` = off), implemented as a refund after the charge. |
 | `DeflectWindowFrames` | `0` | 0-60 | Perfect window of the **block parry** in frames at 30 fps (game value 6). Not the weapon clash. `0` = no change. |
 | `ClashWindowFrames` | `0` | 0-60 | Weapon **clash** window of the heavy -> light counter, in frames at 30 fps (vanilla 0.350606441 s, about 10.5). ChiRen only. `0` = no change. |
+| `SwitchDeflectInject` | `true` | - | Inject a native deflect frame into the ChiRen switch attack so it can parry during startup. ChiRen only. |
+| `SwitchDeflectFrames` | `10` | 0-60 | Switch-attack parry window in frames at 30 fps (10 ≈ 0.333 s). `0` = off. |
+| `SwitchDeflectAngle` | `120` | 1-360 | Switch-attack parry cone in degrees: 120 = front, 360 = all directions around you. |
+| `SwitchDeflectRedEye` | `false` | - | `true` lets the switch parry also deflect red-light attacks (normally dodge-only). |
+| `SwitchKeepStacks` | `true` | - | Keep ChiRen blade stacks (刀劲) across a weapon switch. |
+| `SwitchAttackBlock` | `false` | - | Older attack-box route for the switch attack's block judgement. Leave off; use `SwitchDeflectInject`. Do not enable both routes. |
+| `SwitchAttackBranch` | `"Normal"` | - | Attack-box route only: the switch attack's deflect branch. |
+| `SwitchAttackWindowFrames` | `7` | 0-60 | Attack-box route only: switch attack block window in frames at 30 fps. `0` = only fix the branch. |
 | `InvulnSeconds` | `1.2` | 0-5 | Game invulnerability applied after a clash. `0` = off. |
 | `HealthGuard` | `false` | - | 16 ms health write-back during the invulnerability window. Fallback only; leave off unless the game effect lets damage through. |
 | `TornadoInvulnSeconds` | `2.5` | 0-5 | Invulnerability applied by a whirlwind cast. |
-| `TornadoClashMin` | `3` | 1-6 | Lower end of the whirlwind damage multiplier. |
+| `TornadoClashMin` | `1` | 1-6 | Multiplier floor; default 1 makes the multiplier equal the clash streak. |
 | `TornadoClashMax` | `6` | 3-10 | Highest stored clash streak; also the upper end of the multiplier. |
 | `TornadoDamageScale` | `1.0` | 1.0-3.0 | Extra multiplier on top of the streak. |
 | `TornadoDamageSeconds` | `4.0` | 1.0-8.0 | Safety restore time for the patched bullet damage. |
 | `TornadoBurnSeconds` | `15` | 0-60 | Fire duration started or extended by a whirlwind cast. |
+| `TornadoEasyCast` | `false` | - | After a clash, force blade-force Lv3 so one clash can cast the whirlwind. Fills the blade meter; may buff normal heavies before the cast. |
 | `BreakOnClash` | `true` | - | Enable the three-clash interrupt. |
 | `BreakThreshold` | `3` | 1-10 | Clashes needed to fill the break meter. |
 | `BreakHoldSeconds` | `1.2` | 0-3 | Keep the target in the Break reaction for this long; `0` = no replays. |
+| `ClashSlowmoEnabled` | `false` | - | Extra world slow-down on a successful clash, on top of the game's own clash slow-motion. You slow with the world. |
+| `ClashSlowmoSpeed` | `0.3` | 0.05-1.0 | World speed during the clash slow-down (0.3 = 30 %). |
+| `ClashSlowmoSeconds` | `0.4` | 0.05-2.0 | Real seconds the clash slow-down lasts. |
 | `LogEvents` | `true` | - | Write clash, free-attack, cost and fire lines to `UE4SS.log`. |
-| `LogDamage` | `true` | - | Write damage lines and sample the enemy's health. |
+| `LogDamage` | `false` | - | Write damage lines and sample the enemy's health. Turn on to debug damage. |
+| `ProbeSwitchAttack` | `false` | - | Temporary read-only probe of switch/counter timelines. Leave off. |
 
 A value outside its range keeps the default, and the log names the setting.
 
@@ -102,19 +128,32 @@ return {
     HeavyCostScale = 0.5,
     DeflectWindowFrames = 0,
     ClashWindowFrames = 0,
+    SwitchDeflectInject = true,
+    SwitchDeflectFrames = 10,
+    SwitchDeflectAngle = 120,
+    SwitchDeflectRedEye = false,
+    SwitchKeepStacks = true,
+    SwitchAttackBlock = false,
+    SwitchAttackBranch = "Normal",
+    SwitchAttackWindowFrames = 7,
     InvulnSeconds = 1.2,
     HealthGuard = false,
     TornadoInvulnSeconds = 2.5,
-    TornadoClashMin = 3,
+    TornadoClashMin = 1,
     TornadoClashMax = 6,
     TornadoDamageScale = 1.0,
     TornadoDamageSeconds = 4.0,
     TornadoBurnSeconds = 15,
+    TornadoEasyCast = false,
     BreakOnClash = true,
     BreakThreshold = 3,
     BreakHoldSeconds = 1.2,
+    ClashSlowmoEnabled = false,
+    ClashSlowmoSpeed = 0.3,
+    ClashSlowmoSeconds = 0.4,
     LogEvents = true,
-    LogDamage = true,
+    LogDamage = false,
+    ProbeSwitchAttack = false,
 }
 ```
 
@@ -143,7 +182,7 @@ return {
 ## Log lines
 
 ```
-[ChiRenBlade] 0.90 loaded
+[ChiRenBlade] 1.0 loaded
 [ChiRenBlade] hooked ConsumeReceivedFrame
 [ChiRenBlade] clash skipped (block): deflect frame consumed
 [ChiRenBlade] clash (deflect frame consumed): 6 free heavy attacks
@@ -194,8 +233,8 @@ one.
 
 ## Credits
 
-Written by Altair, with DeepSeek-V4.1-Flash-1017 (Qoder model selector), Gemini (Argon) and Kimi (K3.1 Pro) as
-collaborators.
+Written by Altair. Main contributors: DeepSeek-V4.1-Flash-1017 and Qwen4-Max-Preview (both via the Qoder model
+selector). Supporting contributors: Gemini (Argon) and Kimi (K3.1 Pro).
 
 ## License
 
@@ -204,7 +243,7 @@ collaborators.
 ## 中文指南
 
 炽刃专用的 UE4SS Lua mod，适用于《影之刃零》（UE 5.7）。核心是拼刀后的奖励链：免杀气重攻击、刀上火、短暂
-无敌；拼刀还累积层数，风回云卷按层数造成 3–6 倍伤害，满 3 次拼刀用游戏原生 Break 受击打断敌人；此外每次
+无敌；拼刀还累积层数，风回云卷倍率等于拼刀次数（默认 1–6 倍），满 3 次拼刀用游戏原生 Break 受击打断敌人；此外每次
 重攻击的杀气消耗减半。
 
 游戏版本 `26367565`（Steam），配套的定制 UE4SS `v3.0.1-1195-g1ceefac8`。
@@ -222,8 +261,9 @@ collaborators.
   `HealthGuard` 默认关闭；打开后会在无敌窗口内每 16ms 把血量写回起始值，作为游戏效果之外的兜底。
 - **风回云卷增伤。** 每次 `GA_Hun_ChiRen_BSup_C` 释放时临时改两颗子弹的 `PhysicalDamage` 和 `ElementDamage`，
   结束自动还原。倍率 = `max(TornadoClashMin, min(拼刀层数, TornadoClashMax)) × TornadoDamageScale`，
-  默认 3–6 倍，最多存 6 次拼刀；双发的第二发在 4 秒内沿用第一发倍率。每次释放还有 2.5 秒无敌，并施加或
-  延长 15 秒火焰。
+  默认倍率等于拼刀次数（1–6 倍，下限 `TornadoClashMin` = 1），最多存 6 次拼刀；双发的第二发在 4 秒内沿用
+  第一发倍率。每次释放还有 2.5 秒无敌，并施加或延长 15 秒火焰。可选 `TornadoEasyCast`（默认关）会在拼刀后
+  把刀劲顶到三档，让 1 次拼刀就能放龙卷；代价是刀劲条即满、放龙卷前的普通重攻击可能吃满档加成。
 - **3 次拼刀打断。** 每次非格挡拼刀给该敌人加一层架势，满 `BreakThreshold`（3）时用游戏自己的
   `BP_DeflectHitreactAttackSource_Break_C` 走 `HitreactComponent:PlayHitreactToAvatar`，受击、动画和退出
   都是原生流程（约 1.0–1.8 秒）。`BreakHoldSeconds` 会在普通受击提前顶掉时补一次（最多重放两次）。
@@ -235,7 +275,15 @@ collaborators.
 - **可选拼刀窗口。** `ClashWindowFrames` 默认 0（不改）。设成非 0 时，把「重击接轻击」派生拼刀
   （`GA_Hun_Long_Counter_C`）里那条独立判定行 `GAA_DeflectFrame_C` 的时长改成该帧数（30fps 基准）。
   原版 0.350606441 秒 ≈ 10.5 帧；只对炽刃生效，其他长兵保持原版。
-- **伤害日志。** `LogDamage = true` 时会采样最近敌人的血量，写 `damage hit` / `action damage`，并每 3 秒写
+- **切武攻击弹反。** 炽刃切武攻击（`GA_Hun_ChiRen_SWT_C`）原版没有弹反帧，起手完全不能格挡。
+  `SwitchDeflectInject` 在 start=0 注入一行原生 `GAA_DeflectFrame_C`，让它像重击接轻击反击那样拥有拼刀窗口。
+  `SwitchDeflectFrames` 调窗口帧数，`SwitchDeflectAngle` 调判定角度（默认 120 前方扇形，360 全向），
+  `SwitchDeflectRedEye` 决定是否连红光也弹（默认关）。`SwitchKeepStacks` 切武后保留刀劲层数。只对炽刃生效。
+- **拼刀时间放缓（额外层，默认关）。** 原版拼刀本来就会短暂放缓；把 `ClashSlowmoEnabled = true` 打开后，mod 在此之上
+  再叠一层，把全世界放缓到 `ClashSlowmoSpeed`（30%），持续 `ClashSlowmoSeconds`（0.4 秒）真实时间，增强打击反馈；
+  玩家也跟着慢。用引擎的 `DemoPlayTimeDilation` 因子（不是游戏的 `TimeDilation`），真实时间计时，无敌和火焰窗口
+  不受影响。只在拼刀触发（原版拼刀弹反和切武弹反都算），按住格挡不触发。
+- **伤害日志。** `LogDamage = true`（默认关）时会采样最近敌人的血量，写 `damage hit` / `action damage`，并每 3 秒写
   一条 `damage watch` 显示当前目标和血量。
 
 ### 安装
@@ -245,7 +293,7 @@ collaborators.
    原版 UE4SS 不适用于这个游戏。
 2. 把 `ChiRenBlade` 文件夹放进 `<游戏目录>\platform\steam\ue4ss\Mods\`。
 3. 启动游戏。日志写在 `<游戏目录>\platform\steam\ue4ss\UE4SS.log`，第一行应为
-   `[ChiRenBlade] 0.90 loaded`。
+   `[ChiRenBlade] 1.0 loaded`。
 
 文件夹里带有 `enabled.txt`，不需要在 `mods.txt` 里登记。
 
@@ -266,26 +314,39 @@ collaborators.
 | `HeavyCostScale` | `0.5` | 0.05-1.0 | 重攻击杀气的永久倍率。`1.0` = 关闭；实现是扣后回补。 |
 | `DeflectWindowFrames` | `0` | 0-60 | **格挡弹反**的完美窗口帧数（30 fps），游戏原值 6。`0` = 不改。 |
 | `ClashWindowFrames` | `0` | 0-60 | **拼刀**（重击接轻击派生）的判定窗口帧数（30fps），原版 0.350606441 秒 ≈ 10.5 帧。只对炽刃生效。`0` = 不改。 |
+| `SwitchDeflectInject` | `true` | - | 给炽刃切武攻击注入原生弹反帧，让起手就能弹反。只对炽刃生效。 |
+| `SwitchDeflectFrames` | `10` | 0-60 | 切武弹反窗口帧数（30fps），10 ≈ 0.333 秒。`0` = 关闭。 |
+| `SwitchDeflectAngle` | `120` | 1-360 | 切武弹反判定角度：120 = 前方扇形，360 = 全身全向。 |
+| `SwitchDeflectRedEye` | `false` | - | `true` 让切武弹反也能弹红光（游戏里红光本来只能闪避）。 |
+| `SwitchKeepStacks` | `true` | - | 切武器后保留炽刃刀劲层数。 |
+| `SwitchAttackBlock` | `false` | - | 旧的攻击盒路线（切武格挡判定）。保持关闭，用 `SwitchDeflectInject`；两条路线不要同时开。 |
+| `SwitchAttackBranch` | `"Normal"` | - | 仅攻击盒路线：切武攻击的弹反分支。 |
+| `SwitchAttackWindowFrames` | `7` | 0-60 | 仅攻击盒路线：切武格挡窗口帧数（30fps）。`0` = 只改分支。 |
 | `InvulnSeconds` | `1.2` | 0-5 | 拼刀后的游戏无敌秒数。`0` = 关闭。 |
 | `HealthGuard` | `false` | - | 无敌窗口内每 16ms 写回血量。只在游戏无敌漏伤害时才需要打开。 |
 | `TornadoInvulnSeconds` | `2.5` | 0-5 | 风回云卷释放时的无敌秒数。 |
-| `TornadoClashMin` | `3` | 1-6 | 龙卷倍率的下限。 |
+| `TornadoClashMin` | `1` | 1-6 | 倍率下限；默认 1 即倍率等于拼刀次数。 |
 | `TornadoClashMax` | `6` | 3-10 | 最多存储的拼刀层数，也是倍率上限。 |
 | `TornadoDamageScale` | `1.0` | 1.0-3.0 | 在层数之外再乘的倍率。 |
 | `TornadoDamageSeconds` | `4.0` | 1.0-8.0 | 子弹伤害替换的兜底还原时间。 |
 | `TornadoBurnSeconds` | `15` | 0-60 | 龙卷释放施加/延长的火焰秒数。 |
+| `TornadoEasyCast` | `false` | - | 拼刀后强制刀劲三档，让 1 次拼刀就能放龙卷。刀劲条即满；放龙卷前的普通重攻击可能吃满档加成。 |
 | `BreakOnClash` | `true` | - | 是否启用 3 次拼刀打断。 |
 | `BreakThreshold` | `3` | 1-10 | 蓄满打断架势需要的拼刀次数。 |
 | `BreakHoldSeconds` | `1.2` | 0-3 | 维持 Break 受击的秒数；`0` = 不重放。 |
+| `ClashSlowmoEnabled` | `false` | - | 拼刀成功时在游戏自带放缓之上再叠一层全世界放缓；玩家也跟着慢。 |
+| `ClashSlowmoSpeed` | `0.3` | 0.05-1.0 | 放缓期间的世界速度（0.3 = 30%）。 |
+| `ClashSlowmoSeconds` | `0.4` | 0.05-2.0 | 放缓持续的真实秒数。 |
 | `LogEvents` | `true` | - | 是否把拼刀、免耗、杀气消耗和火焰时长写进 `UE4SS.log`。 |
-| `LogDamage` | `true` | - | 是否写伤害日志并采样敌人血量。 |
+| `LogDamage` | `false` | - | 是否写伤害日志并采样敌人血量。排查伤害时再打开。 |
+| `ProbeSwitchAttack` | `false` | - | 切武/反击时间轴的临时只读探测。保持关闭。 |
 
 范围外的值会保留默认值，日志会说明是哪一项。
 
 ### 日志示例
 
 ```
-[ChiRenBlade] 0.90 loaded
+[ChiRenBlade] 1.0 loaded
 [ChiRenBlade] clash skipped (block): deflect frame consumed
 [ChiRenBlade] clash (deflect frame consumed): 6 free heavy attacks
 [ChiRenBlade] invuln: applied 1.2 s

@@ -1,7 +1,7 @@
 local UEHelpers = require("UEHelpers")
 
 local MOD = "ChiRenBlade"
-local VERSION = "0.90"
+local VERSION = "1.0"
 
 local DEFAULTS = {
     Charges = 6,
@@ -12,23 +12,31 @@ local DEFAULTS = {
     HeavyCostScale = 0.5,
     DeflectWindowFrames = 0,
     ClashWindowFrames = 0,
-    SwitchAttackBlock = true,
+    SwitchAttackBlock = false,
     SwitchAttackBranch = "Normal",
     SwitchAttackWindowFrames = 7,
+    SwitchDeflectInject = true,
+    SwitchDeflectFrames = 10,
+    SwitchDeflectAngle = 120,
+    SwitchDeflectRedEye = false,
     SwitchKeepStacks = true,
     InvulnSeconds = 1.2,
     HealthGuard = false,
     TornadoInvulnSeconds = 2.5,
-    TornadoClashMin = 3,
+    TornadoClashMin = 1,
     TornadoClashMax = 6,
     TornadoDamageScale = 1.0,
     TornadoDamageSeconds = 4.0,
     TornadoBurnSeconds = 15,
+    TornadoEasyCast = false,
     BreakOnClash = true,
     BreakThreshold = 3,
     BreakHoldSeconds = 1.2,
+    ClashSlowmoEnabled = false,
+    ClashSlowmoSpeed = 0.3,
+    ClashSlowmoSeconds = 0.4,
     LogEvents = true,
-    LogDamage = true,
+    LogDamage = false,
     ProbeSwitchAttack = false,
 }
 
@@ -76,8 +84,8 @@ local errors = 0
 local charges = 0
 -- Clash streak for 风回云卷 (GA_Hun_ChiRen_BSup): the streak sets the damage multiplier from
 -- TornadoClashMin to TornadoClashMax, and a cast consumes the whole streak. The cast itself still
--- needs the game's blade-force Lv3, which is what turns LB+Y into the whirlwind.
-local tornadoCombo = 0
+-- needs the game's blade-force Lv3, which is what turns LB+Y into the whirlwind. The streak lives in
+-- TORNADO.combo; TornadoEasyCast can top the tier to Lv3 so a single clash can cast.
 local origCosts = {}
 local hookedHeavy = {}
 local hookedDeflect = false
@@ -158,6 +166,8 @@ local LIMITS = {
     DeflectWindowFrames = { 0, 60 },
     ClashWindowFrames = { 0, 60 },
     SwitchAttackWindowFrames = { 0, 60 },
+    SwitchDeflectFrames = { 0, 60 },
+    SwitchDeflectAngle = { 1, 360 },
     InvulnSeconds = { 0, 5 },
     TornadoInvulnSeconds = { 0, 5 },
     TornadoClashMin = { 1, 6 },
@@ -167,6 +177,8 @@ local LIMITS = {
     TornadoBurnSeconds = { 0, 60 },
     BreakThreshold = { 1, 10 },
     BreakHoldSeconds = { 0, 3 },
+    ClashSlowmoSpeed = { 0.05, 1.0 },
+    ClashSlowmoSeconds = { 0.05, 2.0 },
 }
 
 local Settings = {}
@@ -196,8 +208,8 @@ elseif not okConfig then
     log("config.lua not read; every setting uses its default.")
 end
 if Settings.TornadoClashMin > Settings.TornadoClashMax then
-    log("config.lua: TornadoClashMin is above TornadoClashMax; 3 and 6 are used.")
-    Settings.TornadoClashMin = 3
+    log("config.lua: TornadoClashMin is above TornadoClashMax; 1 and 6 are used.")
+    Settings.TornadoClashMin = 1
     Settings.TornadoClashMax = 6
 end
 
@@ -1460,6 +1472,149 @@ end
 
 end
 
+---------------------------------------------------------------------------------------------------------------------
+-- Clash slow-motion: a brief world slow-down on a successful clash, for hit feedback.
+-- Borrows the mechanism of refs/phantombladezero_witchtime (MIT, Kintaro): the world factor is
+-- WorldSettings.DemoPlayTimeDilation, which the engine multiplies with the game's own TimeDilation.
+-- TimeDilation cannot hold a slow-down (the game resets it to 1.0 every frame, and its own red-light
+-- slow-motion uses it); DemoPlayTimeDilation is the replay factor, so the two do not fight. Timing is
+-- real time (os.clock), so the mod's invulnerability/fire/free-attack windows are not stretched. The
+-- player slows with the world: no per-frame CustomTimeDilation hook. The frame loop reads/writes the
+-- factor only while a slow-down runs; idle it is a single boolean check.
+---------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------
+-- 风回云卷 easy cast: top the blade-force tier to Lv3 after a clash so a single clash can cast the
+-- whirlwind. The game gates LB+Y into BSup at blade-force Lv3 and ignores a patched input rule, so
+-- the mod raises the tier instead, with the same native tier-up effect the switch-keep restore uses
+-- (GE_Weapon_Long_BuffIncreaseLevel applied by the ChiRen passive owner). Off by default: it fills
+-- the blade meter on one clash and may buff normal heavy attacks before the cast.
+-- 拼刀后把刀劲顶到三档，让 1 次拼刀就能放风回云卷。游戏在刀劲 Lv3 才把 LB+Y 派生成龙卷，
+-- 改输入规则会被无视，所以 mod 改用切武保层同款的原生升档效果把档位顶上去。默认关闭：
+-- 它会让拼刀 1 次刀劲条即满，放龙卷前的普通重攻击可能吃到满档加成。
+---------------------------------------------------------------------------------------------------------------------
+local TORNADO = {
+    combo = 0, increase = nil, logs = 0, broken = false,
+    -- Clash streak, double-cast followup state/window and easy-cast tier-up, kept here rather than
+    -- as main-chunk locals (200-local cap).
+    followup = nil, followupSeconds = 4.0,
+}
+
+function TORNADO.topTier()
+    if not Settings.TornadoEasyCast or TORNADO.broken then return end
+    local pawn, asc = PlayerAbilities()
+    if not valid(asc) then return end
+    local tier = BladeBuffTier(asc)
+    if tier == nil or tier >= 3 then return end
+    local passive = nil
+    local passives = safe(FindAllOf, "GA_Hun_ChiRen_Passive_C")
+    if passives then
+        for _, p in ipairs(passives) do
+            if valid(p) then
+                local isActive = safe(function() return p.bIsActive end)
+                local owner = safe(function() return p:GetAvatarActorFromActorInfo() end)
+                local same = valid(owner) and valid(pawn) and safe(function()
+                    return owner:GetAddress() == pawn:GetAddress()
+                end)
+                if isActive == true and same == true then
+                    passive = p
+                    break
+                end
+            end
+        end
+    end
+    if not valid(TORNADO.increase) then
+        local path = "/PBZCombatAsset/ActorData/Players/Hun/Weapon/Long/UpgradeData/" ..
+            "GE_Weapon_Long_BuffIncreaseLevel.GE_Weapon_Long_BuffIncreaseLevel_C"
+        TORNADO.increase = safe(StaticFindObject, path)
+        if not valid(TORNADO.increase) then
+            safe(LoadAsset, path)
+            TORNADO.increase = safe(StaticFindObject, path)
+        end
+    end
+    if not valid(passive) or not valid(TORNADO.increase) then
+        TORNADO.broken = true
+        logError("tornado easy: cannot top blade tier (passive or tier-up effect missing)")
+        return
+    end
+    local before = tier
+    for _ = before + 1, 3 do
+        local ok = pcall(function() passive:BP_ApplyGameplayEffectToOwner(TORNADO.increase, 1, 1) end)
+        local after = BladeBuffTier(asc)
+        if not ok or after == nil or after <= before then break end
+        before = after
+    end
+    if TORNADO.logs < 12 then
+        TORNADO.logs = TORNADO.logs + 1
+        LogEvent("tornado easy: blade tier %d->%d", tier, before)
+    end
+end
+
+local CLASH_SLOWMO = {
+    active = false, endsAt = 0, worldSettings = nil, broken = false, logs = 0,
+}
+
+function CLASH_SLOWMO.getWorldSettings()
+    if valid(CLASH_SLOWMO.worldSettings) then return CLASH_SLOWMO.worldSettings end
+    CLASH_SLOWMO.worldSettings = nil
+    local controller = safe(UEHelpers.GetPlayerController)
+    if not valid(controller) then return nil end
+    local world = safe(function() return controller:GetWorld() end)
+    if not valid(world) then return nil end
+    local level = readField(world, "PersistentLevel")
+    if not valid(level) then return nil end
+    local ws = readField(level, "WorldSettings")
+    if valid(ws) then CLASH_SLOWMO.worldSettings = ws end
+    return CLASH_SLOWMO.worldSettings
+end
+
+function CLASH_SLOWMO.restore()
+    CLASH_SLOWMO.active = false
+    local ws = CLASH_SLOWMO.getWorldSettings()
+    if not valid(ws) then return end
+    local cur = readNumber(ws, "DemoPlayTimeDilation")
+    -- Only take back our own value; leave a factor the game or another mod set.
+    if cur ~= nil and math.abs(cur - Settings.ClashSlowmoSpeed) < 0.001 then
+        safe(function() ws.DemoPlayTimeDilation = 1.0 end)
+    end
+end
+
+function CLASH_SLOWMO.frameStep()
+    if not CLASH_SLOWMO.active then return false end
+    local ws = CLASH_SLOWMO.getWorldSettings()
+    if not valid(ws) then
+        CLASH_SLOWMO.active = false
+        return false
+    end
+    if os.clock() >= CLASH_SLOWMO.endsAt then
+        CLASH_SLOWMO.restore()
+        return false
+    end
+    local cur = readNumber(ws, "DemoPlayTimeDilation")
+    if cur ~= nil and math.abs(cur - Settings.ClashSlowmoSpeed) > 0.001 then
+        safe(function() ws.DemoPlayTimeDilation = Settings.ClashSlowmoSpeed end)
+    end
+    return false
+end
+
+function CLASH_SLOWMO.start()
+    if not Settings.ClashSlowmoEnabled or CLASH_SLOWMO.broken then return end
+    local ws = CLASH_SLOWMO.getWorldSettings()
+    if not valid(ws) then return end
+    local ok = pcall(function() ws.DemoPlayTimeDilation = Settings.ClashSlowmoSpeed end)
+    local after = readNumber(ws, "DemoPlayTimeDilation")
+    if not ok or after == nil or math.abs(after - Settings.ClashSlowmoSpeed) > 0.001 then
+        CLASH_SLOWMO.broken = true
+        logError("clash slowmo: world factor write rejected")
+        return
+    end
+    CLASH_SLOWMO.active = true
+    CLASH_SLOWMO.endsAt = os.clock() + Settings.ClashSlowmoSeconds
+    if CLASH_SLOWMO.logs < 12 then
+        CLASH_SLOWMO.logs = CLASH_SLOWMO.logs + 1
+        LogEvent("clash slowmo: %.2f x %.2f s", Settings.ClashSlowmoSpeed, Settings.ClashSlowmoSeconds)
+    end
+end
+
 local function GrantCharges(reason, isBlock)
     local now = os.clock()
     if now - lastClash < Settings.CooldownSeconds then
@@ -1477,9 +1632,11 @@ local function GrantCharges(reason, isBlock)
     LogEvent("clash (%s): %d free heavy attacks", reason, charges)
     TryFire()
     TryInvulnerable()
-    tornadoCombo = math.min(tornadoCombo + 1, Settings.TornadoClashMax)
-    LogEvent("tornado combo: %d/%d", tornadoCombo, Settings.TornadoClashMax)
+    TORNADO.combo = math.min(TORNADO.combo + 1, Settings.TornadoClashMax)
+    LogEvent("tornado combo: %d/%d", TORNADO.combo, Settings.TornadoClashMax)
     TryBreakClash(false, reason)
+    CLASH_SLOWMO.start()
+    TORNADO.topTier()
 end
 
 ---------------------------------------------------------------------------------------------------------------------
@@ -1572,10 +1729,12 @@ local function TryBlockHook()
     if not path then
         return
     end
-    blockHooked = true
     local ok, err = pcall(RegisterHook, path .. ":On Impact", function()
         lastBlockImpactAt = os.clock()
     end)
+    if ok then
+        blockHooked = true
+    end
     LogEvent("block probe: hook ok=%s%s", tostring(ok), ok and "" or (" err=" .. tostring(err)))
 end
 
@@ -1613,7 +1772,6 @@ local function TryDeflectHook()
     if not components or #components == 0 then return end
     local classPath = classPathOf(components[1])
     if not classPath then return end
-    hookedDeflect = true
     local ok, err = pcall(RegisterHook, classPath .. ":ConsumeReceivedFrame", function(context)
         local self = Unwrap(context)
         local name = FullName(self)
@@ -1644,6 +1802,7 @@ local function TryDeflectHook()
         GrantCharges("deflect frame consumed", isBlock)
     end)
     if ok then
+        hookedDeflect = true
         LogEvent("hooked ConsumeReceivedFrame")
     else
         logError("deflect hook: " .. tostring(err))
@@ -1954,26 +2113,22 @@ end
 local tornadoCastAt = nil
 local tornadoCastAbility = nil
 local tornadoCastInvuln = 0
-local tornadoFollowup = nil
--- The second cast of a double cast has no fresh streak; it reuses the first cast's factor while the
--- two casts are this close together.
-local TORNADO_FOLLOWUP_SECONDS = 4.0
 
 OnTornadoCast = function(self, freeAttack)
     local _, abilities = PlayerAbilities()
     local tier = BladeBuffTier(abilities)
-    local streak = tornadoCombo
+    local streak = TORNADO.combo
     -- The second cast of a double cast has no fresh streak; reuse the first cast's factor.
     local factor, reused = nil, false
-    if streak < Settings.TornadoClashMin and tornadoFollowup and
-        os.clock() - tornadoFollowup.at <= TORNADO_FOLLOWUP_SECONDS then
-        factor = tornadoFollowup.factor
+    if streak < Settings.TornadoClashMin and TORNADO.followup and
+        os.clock() - TORNADO.followup.at <= TORNADO.followupSeconds then
+        factor = TORNADO.followup.factor
         reused = true
-        tornadoFollowup = nil
+        TORNADO.followup = nil
     else
         local stacks = math.max(Settings.TornadoClashMin, math.min(streak, Settings.TornadoClashMax))
         factor = stacks * Settings.TornadoDamageScale
-        tornadoFollowup = { factor = factor, at = os.clock() }
+        TORNADO.followup = { factor = factor, at = os.clock() }
     end
     tornadoCastAt = os.clock()
     tornadoCastAbility = valid(self) and self:GetAddress() or nil
@@ -1981,7 +2136,7 @@ OnTornadoCast = function(self, freeAttack)
     LogEvent("tornado cast: streak=%d tier=%d multiplier=x%.2f free=%s%s", streak, tier, factor,
         tostring(freeAttack), reused and " followup" or "")
     NoteAction(string.format("GA_Hun_ChiRen_BSup_C x%.2f%s", factor, reused and " followup" or ""))
-    tornadoCombo = 0
+    TORNADO.combo = 0
 
     if Settings.TornadoInvulnSeconds > 0 then
         LogEvent("tornado invuln: %.1f s", Settings.TornadoInvulnSeconds)
@@ -2243,6 +2398,16 @@ local SWITCH_BLOCK = {
     box = "LGAAction_DurationBulletWithDeflect",
     logs = 0,
     activations = 0,
+}
+
+-- The switch attack has no GAA_DeflectFrame_C row (its only deflect rides on an attack box at
+-- start=0.858 s), so the first 0.858 s of the move cannot parry. Injecting a standalone deflect row
+-- at start=0 gives it a native counter window like GA_Hun_Long_Counter_C. Recipe from Infernal Rouge
+-- Unbound's iru_clash.lua; TrackIndex 15 is the counter's deflect track (verify in game).
+local SWITCH_DEFLECT = {
+    path = "/PBZDeflectSystem/Actions/GAA_DeflectFrame.GAA_DeflectFrame_C",
+    guidA = 0x43484952, guidB = 0x454E5357, track = 15,
+    broken = false, logs = 0, frameClass = nil,
 }
 
 -- The probe body is defined after ProbeLog so it can share the probe log budget.
@@ -2557,12 +2722,148 @@ local function TuneSwitchAttack(context)
     end
 end
 
+-- Idempotent: finds our GUID-marked row and only retimes it, else constructs and appends one. Runs
+-- in the same pre-ActivateAbility slot as the clash window, before the timeline autoplays. Any
+-- self-check mismatch disables injection for the session rather than leaving a half-built row.
+function SWITCH_DEFLECT.inject(context)
+    if not Settings.SwitchDeflectInject or SWITCH_DEFLECT.broken then return end
+    local ability = Unwrap(context)
+    if not valid(ability) then return end
+    local className = safe(function() return ability:GetClass():GetFName():ToString() end)
+    if className ~= SWITCH_BLOCK.ability then return end
+    local timeline = readField(ability, "Main")
+    if not valid(timeline) then
+        if SWITCH_DEFLECT.logs < 12 then
+            SWITCH_DEFLECT.logs = SWITCH_DEFLECT.logs + 1
+            LogEvent("switch deflect: SWT_C has no Main timeline")
+        end
+        return
+    end
+    -- SWT_C is ChiRen-only: its activation already means ChiRen is in hand. Do not gate on
+    -- ChiRenEquipped here -- the ability's ASC is not bound yet in this pre-ActivateAbility slot,
+    -- so that check returned nil and silently skipped every injection.
+    local wanted = Settings.SwitchDeflectFrames / CLASH_FRAME_RATE
+    if wanted > 0 then
+        if wanted < CLASH_MIN_SECONDS then wanted = CLASH_MIN_SECONDS end
+        if wanted > CLASH_MAX_SECONDS then wanted = CLASH_MAX_SECONDS end
+    end
+    local actions = readField(timeline, "Actions")
+    if not valid(actions) then
+        if SWITCH_DEFLECT.logs < 12 then
+            SWITCH_DEFLECT.logs = SWITCH_DEFLECT.logs + 1
+            LogEvent("switch deflect: SWT_C Main has no Actions")
+        end
+        return
+    end
+    local function findOurs()
+        local found
+        safe(function()
+            actions:ForEach(function(_, ref)
+                local row = ref:get()
+                local guid = readField(row, "Guid")
+                if guid and guid.A == SWITCH_DEFLECT.guidA and guid.B == SWITCH_DEFLECT.guidB then
+                    found = row
+                end
+            end)
+        end)
+        return found
+    end
+    local existing = findOurs()
+    if existing then
+        local current = readNumber(existing, "duration")
+        if current == nil or math.abs(current - wanted) < 0.000001 then return end
+        local ok = pcall(function() existing.duration = wanted end)
+        local after = readNumber(existing, "duration")
+        if not ok or after == nil or math.abs(after - wanted) > 0.000001 then
+            SWITCH_DEFLECT.broken = true
+            logError(string.format("switch deflect: window write rejected %.6f -> %.6f",
+                current or -1, after or -1))
+            return
+        end
+        if SWITCH_DEFLECT.logs < 12 then
+            SWITCH_DEFLECT.logs = SWITCH_DEFLECT.logs + 1
+            LogEvent("switch deflect: window %.2f -> %.2f frames", current * CLASH_FRAME_RATE,
+                after * CLASH_FRAME_RATE)
+        end
+        return
+    end
+    if wanted <= 0 then return end
+    if not valid(SWITCH_DEFLECT.frameClass) then
+        SWITCH_DEFLECT.frameClass = ResolveObject(SWITCH_DEFLECT.path)
+    end
+    if not valid(SWITCH_DEFLECT.frameClass) then
+        SWITCH_DEFLECT.broken = true
+        logError("switch deflect: deflect frame class not loaded")
+        return
+    end
+    local frame = safe(StaticConstructObject, SWITCH_DEFLECT.frameClass, timeline,
+        FName("GAA_DeflectFrame_C_ChiRenSW", EFindName.FNAME_Add))
+    if not valid(frame) then
+        SWITCH_DEFLECT.broken = true
+        logError("switch deflect: could not construct deflect frame")
+        return
+    end
+    local melee = safe(function() return frame["Melee Result"].TagName:ToString() end)
+    if melee ~= "Deflect.Result.Perfect" then
+        SWITCH_DEFLECT.broken = true
+        logError("switch deflect: unexpected Melee Result " .. tostring(melee))
+        return
+    end
+    -- The counter's frame raises blade force through these; the switch attack's must not.
+    safe(function() frame["Impact Event"] = { TagName = FName("None", EFindName.FNAME_Add) } end)
+    safe(function() frame["Prepare Event"] = { TagName = FName("None", EFindName.FNAME_Add) } end)
+    -- Spatial gate and red-light acceptance are settings; the defaults match the shipped frame
+    -- (120-degree front cone, no red light). 360 = all directions; RedEye true also parries red.
+    safe(function() frame["Deflect Angle"] = Settings.SwitchDeflectAngle end)
+    safe(function() frame["Accept Red Eye"] = Settings.SwitchDeflectRedEye end)
+    local before = safe(function() return actions:GetArrayNum() end)
+    if type(before) ~= "number" then
+        SWITCH_DEFLECT.broken = true
+        logError("switch deflect: cannot read action count")
+        return
+    end
+    local ok, err = pcall(function()
+        actions[before + 1] = {
+            StartTime = 0.0, Duration = wanted, TriggerTimeOffset = 0.0, EndTriggerTimeOffset = 0.0,
+            Action = frame, TrackIndex = SWITCH_DEFLECT.track,
+            Guid = { A = SWITCH_DEFLECT.guidA, B = SWITCH_DEFLECT.guidB, C = 1, D = 0 },
+        }
+    end)
+    local after = safe(function() return actions:GetArrayNum() end)
+    local added = findOurs()
+    local addedClass = added and safe(function() return added.Action:GetClass():GetFName():ToString() end)
+    if not ok or after ~= before + 1 or added == nil or addedClass ~= CLASH_DEFLECT_CLASS then
+        SWITCH_DEFLECT.broken = true
+        logError(string.format("switch deflect: inject failed (%s; rows %s->%s, action %s)",
+            ok and "no error" or tostring(err), tostring(before), tostring(after), tostring(addedClass)))
+        if added then safe(function() added.duration = 0 end) end
+        return
+    end
+    if SWITCH_DEFLECT.logs < 12 then
+        SWITCH_DEFLECT.logs = SWITCH_DEFLECT.logs + 1
+        LogEvent("switch deflect: injected row %d of %d at start=0, %.2f frames (%.4f s), track %d",
+            before + 1, after, wanted * CLASH_FRAME_RATE, wanted, SWITCH_DEFLECT.track)
+    end
+end
+
 local function TuneClashWindow(context)
     if Settings.ProbeSwitchAttack and ProbeSwitchActivate then
         ProbeSwitchActivate(context)
     end
     TuneSwitchAttack(context)
+    SWITCH_DEFLECT.inject(context)
     KeepBack(context)
+    -- The switch attack is not in ATTACK_CLASSES/HEAVY_CLASSES, so its activation never refreshes
+    -- lastAttackAt. Without this the deflect frame we inject can be credited as a held block
+    -- (attackAge stale, inDeflect true) and lose the clash reward. Refresh on the base hook: event
+    -- driven, no extra polling.
+    local switchAbility = Unwrap(context)
+    if valid(switchAbility) then
+        local switchClass = safe(function() return switchAbility:GetClass():GetFName():ToString() end)
+        if switchClass == SWITCH_BLOCK.ability then
+            lastAttackAt = os.clock()
+        end
+    end
     if Settings.ClashWindowFrames <= 0 then return end
     local ability = Unwrap(context)
     if not valid(ability) then return end
@@ -2629,7 +2930,7 @@ end
 local function TryClashWindowHook()
     if clashWindowHooked then return end
     if Settings.ClashWindowFrames <= 0 and not Settings.ProbeSwitchAttack
-        and not Settings.SwitchAttackBlock then return end
+        and not Settings.SwitchAttackBlock and not Settings.SwitchDeflectInject then return end
     local ok, err = pcall(RegisterHook, CLASH_ABILITY_BASE, TuneClashWindow)
     if not ok then
         logError("clash window hook: " .. tostring(err))
@@ -3321,6 +3622,11 @@ local function SampleSafe()
     if not keepOk then logError(keepErr) end
     local dmgOk, dmgErr = pcall(TickDamage, os.clock())
     if not dmgOk then logError(dmgErr) end
+    -- Safety net: if the slow-motion frame loop ever stops restoring, take the factor back here.
+    if CLASH_SLOWMO.active and os.clock() > CLASH_SLOWMO.endsAt + 0.3 then
+        local slowOk, slowErr = pcall(CLASH_SLOWMO.restore)
+        if not slowOk then logError(slowErr) end
+    end
 end
 
 log(VERSION .. " loaded")
@@ -3329,9 +3635,19 @@ if type(LoopInGameThreadWithDelay) == "function" then
     LoopInGameThreadWithDelay(1500, TickSafe)
     -- Faster than the hook loop, so the fire duration in the log is close to the real one.
     LoopInGameThreadWithDelay(300, SampleSafe)
+    -- Real-time frame loop for the clash slow-down (idle: a single boolean check).
+    LoopInGameThreadWithDelay(16, CLASH_SLOWMO.frameStep)
 else
     LoopAsync(1500, function()
         ExecuteInGameThread(TickSafe)
+        return false
+    end)
+    LoopAsync(300, function()
+        ExecuteInGameThread(SampleSafe)
+        return false
+    end)
+    LoopAsync(16, function()
+        ExecuteInGameThread(CLASH_SLOWMO.frameStep)
         return false
     end)
 end

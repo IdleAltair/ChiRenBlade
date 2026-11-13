@@ -51,14 +51,40 @@ return {
     -- 不改则为 0，只影响炽刃。
     ClashWindowFrames = 0,
 
-    -- The ChiRen switch-weapon attack's block judgement. Its attack box already allows deflect
-    -- (DeflectBulletType=Normal), but ships with Branch=None and a 0.100 s window, while BaiYing's
-    -- switch attack uses Branch=Normal and 0.241 s. Both are aligned to BaiYing here.
-    -- Window is in frames at 30 fps (7 = 0.233 s). 0 = leave the window alone, only fix Branch.
-    -- 炽刃切武攻击的格挡判定。它的攻击判定盒本来就允许拼刀（type=Normal），但 Branch=None、
-    -- 窗口只有 0.100 秒；白影切武是 Branch=Normal、0.241 秒。这里两项都对齐白影。
-    -- 窗口单位是 30fps 下的帧数（7 帧 ≈ 0.233 秒）。0 = 只改 Branch、不动窗口。只影响炽刃切武攻击。
-    SwitchAttackBlock = true,
+    -- The ChiRen switch-weapon attack's parry. Two routes; the inject route is the default.
+    -- 炽刃切武攻击的格挡/拼刀。两条路线，默认用注入路线。
+    --
+    -- Inject route (SwitchDeflectInject): the switch attack has no native deflect row, so its first
+    -- 0.858 s cannot parry at all. This injects a GAA_DeflectFrame_C row at start=0, giving the move
+    -- a native counter window like the heavy->light counter. Window in frames at 30 fps (10 = 0.333 s,
+    -- close to the counter's 0.3506 s). 0 = off. ChiRen only.
+    -- 注入路线（SwitchDeflectInject）：切武攻击天生没有弹反帧行，前 0.858 秒完全不能格挡。
+    -- 这里在 start=0 注入一行 GAA_DeflectFrame_C，让切武攻击像重击接轻击反击那样拥有原生拼刀窗口。
+    -- 窗口单位是 30fps 下的帧数（10 帧 ≈ 0.333 秒，接近反击的 0.3506 秒）。0 = 关闭。只影响炽刃。
+    SwitchDeflectInject = true,
+    SwitchDeflectFrames = 10,
+
+    -- The injected deflect frame's spatial gate and red-light acceptance. Angle is the front cone in
+    -- degrees (1-360): 120 = the shipped front cone, 360 = all directions around you. RedEye false =
+    -- the frame parries blue/black attacks but not red (red is dodge-only in the game); true also
+    -- parries red. Defaults match the game's own counter frame; raise them only if you want a
+    -- stronger switch parry. ChiRen only.
+    -- 注入弹反帧的判定角度与红光接受。Angle 是前方扇形角度（1-360）：120 = 原版前方扇形，
+    -- 360 = 全身全向。RedEye false = 只弹蓝光/黑光、不弹红光（游戏里红光只能闪避）；true 连红光也弹。
+    -- 默认与游戏原生反击帧一致；想要更强的切武弹反再调高。只影响炽刃。
+    SwitchDeflectAngle = 120,
+    SwitchDeflectRedEye = false,
+
+    -- Attack-box route (SwitchAttackBlock, off by default): the older approach. The switch attack's
+    -- attack box already allows deflect (DeflectBulletType=Normal) but ships with Branch=None and a
+    -- 0.100 s window at start=0.858 s; this aligns Branch and window to BaiYing (Normal / 0.241 s).
+    -- Kept as a fallback; it only touches the hit phase, not the move's startup. Window in frames at
+    -- 30 fps (7 = 0.233 s). 0 = only fix Branch. Do not enable both routes at once.
+    -- 攻击盒路线（SwitchAttackBlock，默认关闭）：旧方案。切武攻击的攻击判定盒本来就允许拼刀
+    -- （type=Normal），但 Branch=None、窗口只有 0.100 秒且位于 start=0.858 秒；这里把 Branch 与窗口
+    -- 对齐白影（Normal / 0.241 秒）。保留作回退；它只改命中段、不改起手。窗口单位 30fps 帧数
+    -- （7 帧 ≈ 0.233 秒）。0 = 只改 Branch。两条路线不要同时开。
+    SwitchAttackBlock = false,
     SwitchAttackBranch = "Normal",
     SwitchAttackWindowFrames = 7,
 
@@ -88,12 +114,13 @@ return {
     -- 风回云卷（GA_Hun_ChiRen_BSup_C，重攻击触发）释放时的无敌秒数（0-5）。0 = 关闭。
     TornadoInvulnSeconds = 2.5,
 
-    -- Lowest clash count used for the tornado damage multiplier (1-6). The whirlwind itself still
-    -- needs the game's blade-force Lv3, so a real cast normally happens at 3+ clashes; this value
-    -- is the multiplier floor for a cast that arrives with fewer, which makes the default range 3-6x.
-    -- 计入龙卷伤害倍率的最低拼刀次数（1-6）。风回云卷本身仍需要游戏的三档刀劲，
-    -- 实际释放时通常已有 3 次以上拼刀；这个值只是次数不足时的倍率下限，默认倍率范围即 3-6 倍。
-    TornadoClashMin = 3,
+    -- Multiplier floor for the tornado (1-6). The damage multiplier is the clash streak itself
+    -- (1 clash = 1x, 3 = 3x, capped at TornadoClashMax), floored at this value. Default 1 means the
+    -- multiplier equals the clash count; raise it to guarantee a minimum. With TornadoEasyCast on,
+    -- a single clash can cast the whirlwind at 1x.
+    -- 龙卷倍率下限（1-6）。伤害倍率就是拼刀次数本身（1 次 1 倍、3 次 3 倍，封顶 TornadoClashMax），
+    -- 不低于此值。默认 1 即倍率=拼刀次数；调高可保底。打开 TornadoEasyCast 后 1 次拼刀即可以 1 倍放龙卷。
+    TornadoClashMin = 1,
 
     -- Highest clash count that counts toward the tornado (3-10). The clash streak is shown by
     -- "tornado combo: n/max" in the log and is consumed by a cast; six is the most stored clashes.
@@ -122,6 +149,16 @@ return {
     -- 至少这个秒数。
     TornadoBurnSeconds = 15,
 
+    -- After a clash, force the blade-force tier to Lv3 so a single clash can cast 风回云卷 (false =
+    -- off, keeping the game's native "fill the blade meter first" gate). The mod cannot lower the
+    -- game's Lv3 cast gate, so it raises the tier with the native tier-up effect. Side effects: the
+    -- blade meter fills on one clash, and normal heavy attacks before the cast may gain the full-tier
+    -- bonus. Turn it on to test the easy-cast shortcut.
+    -- 拼刀后强制把刀劲顶到三档，让 1 次拼刀就能放风回云卷（false = 关闭，保留游戏原生「先攒满刀劲」门槛）。
+    -- mod 降不了游戏的 Lv3 释放门槛，所以用原生升档效果把档位顶上去。副作用：拼刀 1 次刀劲条即满，
+    -- 放龙卷前的普通重攻击可能吃到满档加成。想体验「一次拼刀放龙卷」的捷径时打开。
+    TornadoEasyCast = false,
+
     -- Interrupt the nearest enemy once the break meter fills (false = off). A full meter plays the
     -- game's own Break attack source on the enemy's HitreactComponent, so the state, animation and
     -- exit all run natively (about 1.0-1.8 s). Below the threshold the enemy keeps acting.
@@ -144,6 +181,22 @@ return {
     -- 窗口内一旦敌人离开 Break 状态就重放一次 Break 源。0 = 只施加一次。
     BreakHoldSeconds = 1.2,
 
+    -- An EXTRA world slow-down on a successful clash, on top of the game's own built-in clash
+    -- slow-motion (false = off, the default). The vanilla clash already slows time briefly; this layer
+    -- stacks another factor for stronger hit feedback. The whole world (enemies, bosses, projectiles)
+    -- slows to Speed for Seconds of real time; you slow with it. Uses the engine's DemoPlayTimeDilation
+    -- factor, so it does not fight the game's own slow-motion, and real-time timing means your
+    -- invulnerability/fire windows are not stretched. Speed 0.05-1.0 (0.3 = 30 %), Seconds 0.05-2.0.
+    -- Only triggers on a clash (vanilla clash-parry and switch-parry alike), not a held block.
+    -- 拼刀成功时在游戏自带放缓之上再叠一层全世界放缓（false = 关闭，默认）。原版拼刀本来就会短暂放缓，
+    -- 这一层是额外叠加，增强打击反馈。整个世界（敌人、boss、弹幕）放缓到 Speed，持续 Seconds 秒真实时间；
+    -- 玩家也跟着慢。用引擎的 DemoPlayTimeDilation 因子，不与游戏自己的慢放冲突；真实时间计时，
+    -- 所以无敌/火焰窗口不会被拉长。Speed 0.05-1.0（0.3 = 30%），Seconds 0.05-2.0。
+    -- 只在拼刀触发（原版拼刀弹反和切武弹反都算），按住格挡不触发。
+    ClashSlowmoEnabled = false,
+    ClashSlowmoSpeed = 0.3,
+    ClashSlowmoSeconds = 0.4,
+
     -- Write clash, free-attack, cost and fire lines to UE4SS.log.
     -- 把拼刀、免耗、消耗和火焰时长写进 UE4SS.log。
     LogEvents = true,
@@ -154,7 +207,9 @@ return {
     -- 记录每个动作造成的伤害（每一跳 "damage hit: ..."，每个动作汇总 "action damage: ..."）。
     -- 每 0.1 秒采样最近敌人的血量，归给最近 1.5 秒内开始的技能；
     -- 燃烧/环境/其他来源的伤害会显示为没有动作。
-    LogDamage = true,
+    -- Off by default for normal play (less log I/O); turn on to debug damage.
+    -- 默认关闭以减少日常日志开销；排查伤害时再打开。
+    LogDamage = false,
 
     -- Temporary probe for the switch-attack block judgement: records the first activation of every
     -- player ability and dumps the Main timeline of switch/counter abilities. Read-only.

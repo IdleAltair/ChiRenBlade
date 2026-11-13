@@ -51,6 +51,26 @@ return {
     -- 不改则为 0，只影响炽刃。
     ClashWindowFrames = 0,
 
+    -- The ChiRen switch-weapon attack's block judgement. Its attack box already allows deflect
+    -- (DeflectBulletType=Normal), but ships with Branch=None and a 0.100 s window, while BaiYing's
+    -- switch attack uses Branch=Normal and 0.241 s. Both are aligned to BaiYing here.
+    -- Window is in frames at 30 fps (7 = 0.233 s). 0 = leave the window alone, only fix Branch.
+    -- 炽刃切武攻击的格挡判定。它的攻击判定盒本来就允许拼刀（type=Normal），但 Branch=None、
+    -- 窗口只有 0.100 秒；白影切武是 Branch=Normal、0.241 秒。这里两项都对齐白影。
+    -- 窗口单位是 30fps 下的帧数（7 帧 ≈ 0.233 秒）。0 = 只改 Branch、不动窗口。只影响炽刃切武攻击。
+    SwitchAttackBlock = true,
+    SwitchAttackBranch = "Normal",
+    SwitchAttackWindowFrames = 7,
+
+    -- Keep the ChiRen blade stacks (刀劲) across a weapon switch. The three tiers are the gameplay
+    -- tags CharacterState.AbilityState.Long.Buff.Lv1/Lv2/Lv3; a switch can drop them. When a drop is
+    -- seen within 2.5 s of the switch attack, the native tier-up effect is reapplied to restore them.
+    -- Fire is already covered by the burning reapply above. Only affects ChiRen.
+    -- 切武器后保留炽刃刀劲层数。三档就是 tag：CharacterState.AbilityState.Long.Buff.Lv1/Lv2/Lv3，
+    -- 切武可能把它们清掉。切武攻击后 2.5 秒内检测到掉档，就用游戏原生的升档效果补回来。
+    -- 火附魔已由上面的燃烧补火逻辑覆盖。只影响炽刃。
+    SwitchKeepStacks = true,
+
     -- Seconds of the game's own dodge invulnerability applied after a clash (0-5). 0 = off.
     -- 拼刀后获得的无敌秒数（0-5），用的是游戏自己的闪避无敌效果。0 = 关闭。
     InvulnSeconds = 1.2,
@@ -135,4 +155,10 @@ return {
     -- 每 0.1 秒采样最近敌人的血量，归给最近 1.5 秒内开始的技能；
     -- 燃烧/环境/其他来源的伤害会显示为没有动作。
     LogDamage = true,
+
+    -- Temporary probe for the switch-attack block judgement: records the first activation of every
+    -- player ability and dumps the Main timeline of switch/counter abilities. Read-only.
+    -- 切武攻击格挡判定的临时探测：记录玩家每个技能的首次激活，并只读 dump 切武/反击技能的 Main 时间轴。
+    -- 排查用，平时保持 false。
+    ProbeSwitchAttack = false,
 }

@@ -12,6 +12,10 @@ local DEFAULTS = {
     HeavyCostScale = 0.5,
     DeflectWindowFrames = 0,
     ClashWindowFrames = 0,
+    SwitchAttackBlock = true,
+    SwitchAttackBranch = "Normal",
+    SwitchAttackWindowFrames = 7,
+    SwitchKeepStacks = true,
     InvulnSeconds = 1.2,
     HealthGuard = false,
     TornadoInvulnSeconds = 2.5,
@@ -25,6 +29,7 @@ local DEFAULTS = {
     BreakHoldSeconds = 1.2,
     LogEvents = true,
     LogDamage = true,
+    ProbeSwitchAttack = false,
 }
 
 -- The game's global combat config asset holds the block-parry perfect window.
@@ -152,6 +157,7 @@ local LIMITS = {
     HeavyCostScale = { 0.05, 1.0 },
     DeflectWindowFrames = { 0, 60 },
     ClashWindowFrames = { 0, 60 },
+    SwitchAttackWindowFrames = { 0, 60 },
     InvulnSeconds = { 0, 5 },
     TornadoInvulnSeconds = { 0, 5 },
     TornadoClashMin = { 1, 6 },
@@ -1554,31 +1560,6 @@ local function HookChiRenGas()
     LogEvent("ga probe: hooked %d/%d ChiRen abilities", hooked, #CHIREN_GA_BASES)
 end
 
-local abilityHooked = false
-
--- Generic entry: every gameplay ability goes through GameplayAbility::ActivateAbility, so this
--- catches the fire tornado even when its class was not known up front.
-local function TryAbilityHook()
-    if abilityHooked then
-        return
-    end
-    local ok, err = pcall(RegisterHook, "/Script/GameplayAbilities.GameplayAbility:ActivateAbility",
-        function(context)
-            local self = Unwrap(context)
-            if not valid(self) then
-                return
-            end
-            local outer = safe(function() return self:GetOuter() end)
-            local outerName = valid(outer) and FullName(outer) or "?"
-            if not outerName:find("BP_Renewal_Hun", 1, true) then
-                return
-            end
-            LogEvent("ga probe: ability %s", FullName(self))
-        end)
-    abilityHooked = true
-    LogEvent("ga probe: ability hook ok=%s%s", tostring(ok), ok and "" or (" err=" .. tostring(err)))
-end
-
 local function TryBlockHook()
     if blockHooked then
         return
@@ -2084,7 +2065,7 @@ local function HeavyActivate(name, self, classPath)
             end
         end
         if before ~= nil then
-            for _, delay in ipairs({ 60, 150, 400 }) do
+            for _, delay in ipairs({ 400 }) do
                 ExecuteWithDelay(delay, function()
                     ExecuteInGameThread(function()
                         local after = PlayerShachi()
@@ -2254,6 +2235,19 @@ local clashWindowRecords = {}
 local clashWindowLogs = 0
 local chirenWeaponAsset = nil
 
+-- The ChiRen switch attack is GA_Hun_ChiRen_SWT_C (confirmed by the activation sequence: a weapon
+-- swap fires it alone). Its single attack box already allows deflect, but Branch=None and a 0.100 s
+-- window differ from BaiYing's Branch=Normal / 0.241 s. One table keeps this to a single local.
+local SWITCH_BLOCK = {
+    ability = "GA_Hun_ChiRen_SWT_C",
+    box = "LGAAction_DurationBulletWithDeflect",
+    logs = 0,
+    activations = 0,
+}
+
+-- The probe body is defined after ProbeLog so it can share the probe log budget.
+local ProbeSwitchActivate
+
 -- nil = unknown: the weapon asset or its tag table is not loaded yet.
 local function ChiRenEquipped(ability)
     if not valid(chirenWeaponAsset) then
@@ -2279,7 +2273,296 @@ local function ChiRenEquipped(ability)
     return active
 end
 
+---------------------------------------------------------------------------------------------------------------------
+-- Keep ChiRen blade stacks across a weapon switch
+---------------------------------------------------------------------------------------------------------------------
+
+-- The three tiers are gameplay tags (Buff.Lv1/Lv2/Lv3), not a field on the charge object. The tag
+-- library is reached through its Default__ object: static methods on the class object are not
+-- callable in this build. HasMatchingGameplayTag is already proven by ChiRenEquipped.
+local SWITCH_KEEP = {
+    buff = "CharacterState.AbilityState.Long.Buff",
+    tagLibPath = "/Script/ProjectPBZ.Default__PBZBlueprintFunctionLibrary",
+    upgradeRoot = "/PBZCombatAsset/ActorData/Players/Hun/Weapon/Long/UpgradeData/",
+    increaseName = "GE_Weapon_Long_BuffIncreaseLevel",
+    lib = nil,
+    tags = {},
+    increase = nil,
+    lastTier = nil,
+    lastTickAt = 0,
+    wasEquipped = nil,
+    snap = nil,
+    frozen = nil,
+    backAt = 0,
+    logs = 0,
+    tierLogs = 0,
+    apiLogged = false,
+}
+
+-- Burning flag only (1/0, nil when the tag API is unavailable). The fire effect itself is
+-- infinite-duration, so its remaining time carries no information; restore uses FireSeconds.
+local function KeepFire(asc)
+    local count = safe(function() return asc:GetGameplayTagCount({ TagName = BURNING_FNAME }) end)
+    if count == nil then return nil end
+    return count > 0 and 1 or 0
+end
+
+-- Returns the current tier 0-3, or nil when the tag API is unavailable (so a caller can tell
+-- "no stacks" apart from "cannot read").
+local function KeepTier(asc)
+    if not valid(asc) then return nil end
+    local st = SWITCH_KEEP
+    if not valid(st.lib) then
+        st.lib = safe(StaticFindObject, st.tagLibPath)
+    end
+    if not valid(st.lib) then
+        if not st.apiLogged then
+            st.apiLogged = true
+            logError("switch keep: tag library not found " .. st.tagLibPath)
+        end
+        return nil
+    end
+    for tier = 1, 3 do
+        local name = st.buff .. ".Lv" .. tier
+        if st.tags[name] == nil then
+            local tag = safe(function() return st.lib:ConvertStringToGameplayTag(name) end)
+            if tag == nil then
+                if not st.apiLogged then
+                    st.apiLogged = true
+                    logError("switch keep: ConvertStringToGameplayTag failed for " .. name)
+                end
+                return nil
+            end
+            st.tags[name] = tag
+        end
+    end
+    for tier = 3, 1, -1 do
+        local tag = st.tags[st.buff .. ".Lv" .. tier]
+        local has = safe(function() return asc:HasMatchingGameplayTag(tag) end)
+        if has == true then return tier end
+    end
+    return 0
+end
+
+-- The ChiRen switch attack fires when swapping BACK to ChiRen; the clear happened earlier when
+-- swapping away, so this only marks the return. The sampler overwrites the frozen snapshot.
+local function KeepBack(context)
+    if not Settings.SwitchKeepStacks then return end
+    local ability = Unwrap(context)
+    if not valid(ability) then return end
+    local className = safe(function() return ability:GetClass():GetFName():ToString() end)
+    if className ~= SWITCH_BLOCK.ability then return end
+    local st = SWITCH_KEEP
+    st.backAt = os.clock()
+    if st.logs < 20 then
+        st.logs = st.logs + 1
+        local f = st.frozen
+        LogEvent("switch keep: back to ChiRen, frozen=%s",
+            f and string.format("tier=%d fire=%d", f.tier, f.fire) or "nil")
+    end
+end
+
+-- Runs on the 300 ms sampler. While ChiRen is equipped it keeps a snapshot of the last blade tier
+-- and burning remainder; once the weapon swaps away the snapshot is frozen. On swapping back the
+-- frozen state is overwritten onto the player: tiers via the native tier-up effect, fire via TryFire
+-- with the remembered remainder.
+local function KeepTick()
+    local st = SWITCH_KEEP
+    if not Settings.SwitchKeepStacks then return end
+    local now = os.clock()
+    if now - st.lastTickAt < 1.0 then return end
+    st.lastTickAt = now
+    local pawn = GetPlayerPawn()
+    if not valid(pawn) then return end
+    local asc = readField(pawn, "AbilitySystemComponent")
+    if not valid(asc) then return end
+    local tier = KeepTier(asc)
+    if tier == nil then return end
+    if tier ~= st.lastTier then
+        if st.tierLogs < 40 then
+            st.tierLogs = st.tierLogs + 1
+            LogEvent("switch keep: tier %s->%d", tostring(st.lastTier), tier)
+        end
+        st.lastTier = tier
+    end
+    local equipped = nil
+    if not valid(chirenWeaponAsset) then
+        chirenWeaponAsset = safe(StaticFindObject, CHIREN_WEAPON_PATH)
+    end
+    if valid(chirenWeaponAsset) then
+        local equipTags = readField(chirenWeaponAsset, "Weapon Equip Tags")
+        if equipTags ~= nil then
+            local found, active = false, false
+            safe(function()
+                equipTags.GameplayTags:ForEach(function(_, ref)
+                    local tag = ref:get()
+                    local text = safe(function() return tag.TagName:ToString() end)
+                    if text == CHIREN_EQUIP_TAG then
+                        found = true
+                        active = asc:HasMatchingGameplayTag(tag) == true
+                    end
+                end)
+            end)
+            if found then equipped = active end
+        end
+    end
+    local fire = KeepFire(asc)
+    if equipped == true then
+        if tier > 0 then
+            st.snap = {
+                tier = tier,
+                fire = fire or 0,
+                at = now,
+            }
+        elseif st.snap and fire ~= nil and fire ~= 0 then
+            st.snap.fire = fire
+            st.snap.at = now
+        end
+    elseif equipped == false and st.wasEquipped == true and st.snap then
+        st.frozen = st.snap
+        if st.logs < 20 then
+            st.logs = st.logs + 1
+            LogEvent("switch keep: frozen tier=%d fire=%d", st.frozen.tier, st.frozen.fire)
+        end
+    end
+    st.wasEquipped = equipped
+    if st.backAt == 0 or now - st.backAt > 3.0 then return end
+    local snap = st.frozen
+    if snap == nil or now - snap.at > 60.0 then
+        st.frozen = nil
+        st.backAt = 0
+        return
+    end
+    local before = tier
+    if tier < snap.tier then
+        local passive = nil
+        local passives = safe(FindAllOf, "GA_Hun_ChiRen_Passive_C")
+        if passives then
+            for _, p in ipairs(passives) do
+                if valid(p) then
+                    local isActive = safe(function() return p.bIsActive end)
+                    local owner = safe(function() return p:GetAvatarActorFromActorInfo() end)
+                    local same = valid(owner) and safe(function()
+                        return owner:GetAddress() == pawn:GetAddress()
+                    end)
+                    if isActive == true and same == true then
+                        passive = p
+                        break
+                    end
+                end
+            end
+        end
+        if not valid(st.increase) then
+            local path = st.upgradeRoot .. st.increaseName .. "." .. st.increaseName .. "_C"
+            st.increase = safe(StaticFindObject, path)
+            if not valid(st.increase) then
+                safe(LoadAsset, path)
+                st.increase = safe(StaticFindObject, path)
+            end
+        end
+        if not valid(passive) or not valid(st.increase) then
+            if st.logs < 20 then
+                st.logs = st.logs + 1
+                logError(string.format("switch keep: cannot restore to %d (passive=%s ge=%s)",
+                    snap.tier, tostring(valid(passive)), tostring(valid(st.increase))))
+            end
+        else
+            before = KeepTier(asc) or 0
+            for _ = before + 1, snap.tier do
+                local ok = pcall(function() passive:BP_ApplyGameplayEffectToOwner(st.increase, 1, 1) end)
+                local after = KeepTier(asc)
+                if not ok or after == nil or after <= before then break end
+                before = after
+            end
+        end
+    end
+    if snap.fire ~= 0 and (KeepFire(asc) or 0) == 0 then
+        TryFire(true, Settings.FireSeconds)
+    end
+    if st.logs < 20 then
+        st.logs = st.logs + 1
+        LogEvent("switch keep: restored tier %d->%d fire %d (snap tier=%d fire=%d)",
+            tier, before, snap.fire, snap.tier, snap.fire)
+    end
+    st.frozen = nil
+    st.snap = nil
+    st.backAt = 0
+end
+
+-- Rides the same ability-base hook as the clash window so no second base hook is installed, and
+-- writes in the same pre-ActivateAbility slot that made the clash window land before bAutoPlay.
+local function TuneSwitchAttack(context)
+    if not Settings.SwitchAttackBlock then return end
+    local ability = Unwrap(context)
+    if not valid(ability) then return end
+    local className = safe(function() return ability:GetClass():GetFName():ToString() end)
+    if className ~= SWITCH_BLOCK.ability then return end
+    local timeline = readField(ability, "Main")
+    if not valid(timeline) then return end
+    local row, box, count = nil, nil, 0
+    safe(function()
+        timeline.Actions:ForEach(function(_, ref)
+            local candidate = ref:get()
+            local action = readField(candidate, "Action")
+            if valid(action) and FullName(action):find(SWITCH_BLOCK.box, 1, true) then
+                row, box, count = candidate, action, count + 1
+            end
+        end)
+    end)
+    if count ~= 1 or row == nil then
+        if SWITCH_BLOCK.logs < 6 then
+            SWITCH_BLOCK.logs = SWITCH_BLOCK.logs + 1
+            LogEvent("switch block: expected one attack box, found %d", count)
+        end
+        return
+    end
+    local currentBranch = FNameText(readField(box, "Branch"))
+    local currentSeconds = readNumber(row, "duration")
+    if currentSeconds == nil then
+        logError("switch block: the attack box row has no duration")
+        return
+    end
+    local wantedBranch = Settings.SwitchAttackBranch
+    local wantedSeconds = currentSeconds
+    if Settings.SwitchAttackWindowFrames > 0 then
+        wantedSeconds = Settings.SwitchAttackWindowFrames / CLASH_FRAME_RATE
+        if wantedSeconds < CLASH_MIN_SECONDS then wantedSeconds = CLASH_MIN_SECONDS end
+        if wantedSeconds > CLASH_MAX_SECONDS then wantedSeconds = CLASH_MAX_SECONDS end
+    end
+    local branchChanged = currentBranch ~= wantedBranch
+    local durChanged = math.abs(currentSeconds - wantedSeconds) > 0.000001
+    if not branchChanged and not durChanged then return end
+    local branchOk, branchAfter = true, currentBranch
+    if branchChanged then
+        branchOk = pcall(function() box.Branch = FName(wantedBranch, EFindName.FNAME_Add) end)
+        branchAfter = FNameText(readField(box, "Branch"))
+    end
+    local durOk, durAfter = true, currentSeconds
+    if durChanged then
+        durOk = pcall(function() row.duration = wantedSeconds end)
+        durAfter = readNumber(row, "duration") or currentSeconds
+    end
+    if SWITCH_BLOCK.logs < 12 then
+        SWITCH_BLOCK.logs = SWITCH_BLOCK.logs + 1
+        LogEvent("switch block: branch %s->%s (ok=%s) dur %.4f->%.4f s / %.1f->%.1f frames (ok=%s)",
+            currentBranch, branchAfter, tostring(branchOk), currentSeconds, durAfter,
+            currentSeconds * CLASH_FRAME_RATE, durAfter * CLASH_FRAME_RATE, tostring(durOk))
+    end
+    if branchChanged and branchAfter ~= wantedBranch then
+        logError("switch block: branch write rejected " .. currentBranch .. " -> " .. branchAfter)
+    end
+    if durChanged and math.abs(durAfter - wantedSeconds) > 0.000001 then
+        logError(string.format("switch block: duration write rejected %.6f -> %.6f",
+            currentSeconds, durAfter))
+    end
+end
+
 local function TuneClashWindow(context)
+    if Settings.ProbeSwitchAttack and ProbeSwitchActivate then
+        ProbeSwitchActivate(context)
+    end
+    TuneSwitchAttack(context)
+    KeepBack(context)
     if Settings.ClashWindowFrames <= 0 then return end
     local ability = Unwrap(context)
     if not valid(ability) then return end
@@ -2344,15 +2627,18 @@ local function TuneClashWindow(context)
 end
 
 local function TryClashWindowHook()
-    if clashWindowHooked or Settings.ClashWindowFrames <= 0 then return end
+    if clashWindowHooked then return end
+    if Settings.ClashWindowFrames <= 0 and not Settings.ProbeSwitchAttack
+        and not Settings.SwitchAttackBlock then return end
     local ok, err = pcall(RegisterHook, CLASH_ABILITY_BASE, TuneClashWindow)
     if not ok then
         logError("clash window hook: " .. tostring(err))
         return
     end
     clashWindowHooked = true
-    LogEvent("clash window: hook ok (%d frames at %d fps; vanilla %.6f s)", Settings.ClashWindowFrames,
-        CLASH_FRAME_RATE, CLASH_VANILLA_SECONDS)
+    LogEvent("clash window: hook ok (%d frames at %d fps; vanilla %.6f s; switch probe=%s)",
+        Settings.ClashWindowFrames, CLASH_FRAME_RATE, CLASH_VANILLA_SECONDS,
+        tostring(Settings.ProbeSwitchAttack))
 end
 
 ---------------------------------------------------------------------------------------------------------------------
@@ -2364,8 +2650,8 @@ local probeAttempts = 0
 local probeLogs = 0
 
 local function ProbeLog(fmt, ...)
-    if probeLogs >= 200 then
-        if probeLogs == 200 then
+    if probeLogs >= 500 then
+        if probeLogs == 500 then
             probeLogs = probeLogs + 1
             log("probe: log limit reached")
         end
@@ -2396,6 +2682,193 @@ local function ProbeFunctions(classObject, label, limit)
     ProbeLog("probe: %s functions=%d ok=%s", label, #names, tostring(ok))
     for i = 1, math.min(#names, limit) do
         ProbeLog("probe: %s fn %s", label, names[i])
+    end
+end
+
+---------------------------------------------------------------------------------------------------------------------
+-- Probe: switch-attack timeline (block judgement on the ChiRen switch attack)
+---------------------------------------------------------------------------------------------------------------------
+
+-- FName userdata fails IsValid(), so valid() must not gate these reads: that is what turned the
+-- previous dump into wrapper addresses. Each reader is tried in turn without touching logError.
+local function ProbeValue(value)
+    if value == nil then return "nil" end
+    local kind = type(value)
+    if kind ~= "userdata" and kind ~= "table" then return tostring(value) end
+    local ok, tag = pcall(function() return value.TagName end)
+    if ok and tag ~= nil then return TagText(value) end
+    -- UObject:ToString() yields "UObject: 0x...", so names must be tried before it. A UClass's own
+    -- class is "Class", which is useless: for those the object's own name IS the ability class.
+    local okName, name = pcall(function() return value:GetFName():ToString() end)
+    local okClass, cls = pcall(function() return value:GetClass():GetFName():ToString() end)
+    if okName and okClass and type(name) == "string" and type(cls) == "string" then
+        if cls == "Class" then return name end
+        return cls .. "/" .. name
+    end
+    if okClass and type(cls) == "string" then return cls end
+    if okName and type(name) == "string" then return name end
+    ok, tag = pcall(function() return value:ToString() end)
+    if ok and type(tag) == "string" then return tag end
+    return kind
+end
+
+local function ProbeFloatArray(value, limit)
+    if value == nil then return "nil" end
+    local parts = {}
+    local ok = pcall(function()
+        value:ForEach(function(_, ref)
+            if #parts >= limit then return end
+            local item = ref
+            pcall(function() item = ref:get() end)
+            parts[#parts + 1] = tostring(item)
+        end)
+    end)
+    if #parts == 0 then return "empty(iterOk=" .. tostring(ok) .. ")" end
+    return table.concat(parts, ",")
+end
+
+-- Read-only dump of an ability's Main timeline. Two deflect mechanisms exist: a standalone
+-- GAA_DeflectFrame_C row (the clash window) and an attack box that carries its own deflect config.
+-- The switch attack has no former row, so the latter is what the block judgement would ride on.
+local function DumpAbilityTimeline(ability, label, verbose)
+    local timeline = readField(ability, "Main")
+    if not valid(timeline) then
+        ProbeLog("%s: no Main timeline", label)
+        return
+    end
+    local rows, deflects, bulletDumps = 0, 0, 0
+    local ok = pcall(function()
+        timeline.Actions:ForEach(function(_, ref)
+            local row = ref:get()
+            rows = rows + 1
+            local action = readField(row, "Action")
+            local actionName = valid(action) and FullName(action) or "nil"
+            local startTime = readNumber(row, "StartTime")
+            local duration = readNumber(row, "duration")
+            if verbose and rows <= 60 then
+                ProbeLog("%s row%d start=%s dur=%s action=%s", label, rows,
+                    tostring(startTime), tostring(duration), actionName)
+            end
+            if actionName:find(CLASH_DEFLECT_CLASS, 1, true) then
+                deflects = deflects + 1
+                ProbeLog("%s DEFLECT onlyBlock=%s angle=%s weaponIndex=%s breakTimeline=%s comp=%s",
+                    label, ProbeValue(readField(action, "Only Block Hit")),
+                    ProbeValue(readNumber(action, "Deflect Angle")),
+                    ProbeValue(readNumber(action, "Weapon Index")),
+                    ProbeValue(readField(action, "Break Deflect Timeline")),
+                    ProbeValue(readField(action, "Deflect Component")))
+                ProbeLog("%s DEFLECT melee=%s projectile=%s prepare=%s impact=%s maxHitTime=%s",
+                    label, ProbeValue(readField(action, "Melee Result")),
+                    ProbeValue(readField(action, "Projectile Result")),
+                    ProbeValue(readField(action, "Prepare Event")),
+                    ProbeValue(readField(action, "Impact Event")),
+                    ProbeValue(readNumber(action, "Max Hit Game Time")))
+            end
+            -- Matched by family keyword, then confirmed by field presence, so empty subclasses such
+            -- as LGAAction_AddtiveBullet_PreZui_Hun are covered without walking the super chain.
+            if actionName:find("Deflect", 1, true) or actionName:find("Bullet", 1, true) then
+                local hasType, bulletType = pcall(function() return action.DeflectBulletType end)
+                if hasType and bulletType ~= nil and bulletDumps < 4 then
+                    bulletDumps = bulletDumps + 1
+                    ProbeLog("%s BOX row%d start=%s dur=%s type=%s(0=CantDeflect,1=Normal,5=Hold) angle=%s radius=%s knockback=%s holdDist=%s staticRadius=%s",
+                        label, rows, tostring(startTime), tostring(duration), ProbeValue(bulletType),
+                        ProbeValue(readNumber(action, "DeflectAngle")),
+                        ProbeValue(readNumber(action, "DeflectRadius")),
+                        ProbeValue(readNumber(action, "DeflectKnockback")),
+                        ProbeValue(readNumber(action, "HoldDeflectDistance")),
+                        ProbeValue(readField(action, "bStaticRadius")))
+                    ProbeLog("%s BOX row%d strength=%s direction=%s counterAbility=%s branch=%s cachedComp=%s",
+                        label, rows, ProbeValue(readField(action, "DeflectStrength")),
+                        ProbeValue(readField(action, "DeflectDirection")),
+                        ProbeValue(readField(action, "CounterAbility")),
+                        ProbeValue(readField(action, "Branch")),
+                        ProbeValue(readField(action, "CachedDeflectComponent")))
+                    ProbeLog("%s BOX row%d bulletDur=%s preHit=%s runtimePreHit=%s reps=%s sendFrames=[%s] startBullet=[%s] endBullet=[%s]",
+                        label, rows, ProbeValue(readNumber(action, "BulletDuration")),
+                        ProbeValue(readNumber(action, "PreHitPointDuration")),
+                        ProbeValue(readNumber(action, "RuntimePreHitPointDuration")),
+                        ProbeValue(readNumber(action, "BulletRepetitions")),
+                        ProbeFloatArray(readField(action, "SendFrameTimes"), 12),
+                        ProbeFloatArray(readField(action, "StartBulletTimes"), 8),
+                        ProbeFloatArray(readField(action, "EndBulletTimes"), 8))
+                end
+            end
+        end)
+    end)
+    ProbeLog("%s: rows=%d deflectRows=%d boxRows=%d iterOk=%s", label, rows, deflects, bulletDumps,
+        tostring(ok))
+end
+
+local switchSeen = {}
+local switchDumped = {}
+local switchActivateLogs = 0
+local switchSeqLogs = 0
+
+-- Rides the clash-window hook so only one ability-base hook is ever installed. Records the first
+-- activation of every player ability, which is how the talent's LB+Y replacement gets identified.
+ProbeSwitchActivate = function(context)
+    local ability = Unwrap(context)
+    if not valid(ability) then return end
+    local outer = safe(function() return ability:GetOuter() end)
+    local outerName = valid(outer) and FullName(outer) or "?"
+    if not outerName:find("BP_Renewal_Hun", 1, true) then return end
+    local className = safe(function() return ability:GetClass():GetFName():ToString() end)
+    if not className then return end
+    local isSwitch = className:find("SWT", 1, true) or className:find("Switch", 1, true)
+        or className:find("Counter", 1, true)
+    -- The user confirmed the ChiRen switch attack IS the LB+Y fire sweep, and that switching may call
+    -- the same ability as the manual button. GA_Hun_ChiRen_C_C is the likely manual entry, so every
+    -- ChiRen ability gets dumped; non-switch ones only log their deflect boxes to stay in budget.
+    local isChiRen = className:find("ChiRen", 1, true)
+    if not switchSeen[className] then
+        switchSeen[className] = true
+        if switchActivateLogs < 40 then
+            switchActivateLogs = switchActivateLogs + 1
+            ProbeLog("switch probe: activate %s", className)
+        end
+        if (isSwitch or isChiRen) and not switchDumped[className] then
+            switchDumped[className] = true
+            DumpAbilityTimeline(ability, "switch probe " .. className, isSwitch)
+        end
+    end
+    -- Every activation, not just the first: this shows whether a weapon swap fires SWT_C, C_C or
+    -- both. Light-attack chains are excluded so they cannot spend the budget before the swap.
+    local isChiRenKey = isChiRen and not className:find("ChiRen_A", 1, true)
+    if switchSeqLogs < 60 and (isSwitch or isChiRenKey or className:find("Heavy", 1, true)) then
+        switchSeqLogs = switchSeqLogs + 1
+        ProbeLog("switch seq %d: %s", switchSeqLogs, className)
+    end
+    if className == SWITCH_BLOCK.ability then
+        SWITCH_BLOCK.activations = SWITCH_BLOCK.activations + 1
+    end
+end
+
+local switchInstancesDone = false
+
+-- Does not depend on the player actually switching: dumps whatever switch-attack instances exist.
+-- Skips classes the activation hook already dumped so the two paths cannot spend the budget twice.
+local function ProbeSwitchInstances()
+    if switchInstancesDone then return end
+    if not valid(GetPlayerPawn()) then return end
+    switchInstancesDone = true
+    local found = safe(FindAllOf, "BP_SwitchAttack_Base_C")
+    if not found or #found == 0 then
+        ProbeLog("switch probe: no BP_SwitchAttack_Base_C instance")
+        return
+    end
+    ProbeLog("switch probe: %d switch-attack instances", #found)
+    local dumped = 0
+    for _, ability in ipairs(found) do
+        if dumped >= 2 then break end
+        if valid(ability) then
+            local className = safe(function() return ability:GetClass():GetFName():ToString() end)
+            if className and not switchDumped[className] then
+                switchDumped[className] = true
+                dumped = dumped + 1
+                ProbeLog("switch probe: instance %d %s", dumped, className)
+                DumpAbilityTimeline(ability, "switch probe inst" .. dumped, true)
+            end
+        end
     end
 end
 
@@ -2639,6 +3112,13 @@ local CHARGE_FIELD_CANDIDATES = {
     "Energy", "BladeEnergy", "WeaponEnergy", "KnifeForce", "BladeCharge",
 }
 
+-- State for the switch-weapon retention question: does blade energy / fire survive a weapon swap?
+-- Kept in one table so the probe costs a single top-level local.
+local ChiRenSwitchProbe = {
+    tries = 0, passive = nil, charge = nil, tagName = nil, fields = {},
+    lastActivations = 0, prevSnapshot = nil, watchUntil = 0, logs = 0,
+}
+
 local function DumpNumberFields(label, obj, fields)
     if not valid(obj) then
         return
@@ -2675,6 +3155,8 @@ local function DumpPropertyNames(label, obj)
     LogEvent("%s props(%d): %s", label, #names, table.concat(names, ","))
 end
 
+-- One-shot only once it actually finds the passive: the assets load lazily, and burning the flag on
+-- the first tick (13:11:44 in the previous log) is why the earlier runs never dumped anything.
 local function ProbeChiRenData()
     if chiRenDataProbeDone then
         return
@@ -2683,15 +3165,21 @@ local function ProbeChiRenData()
     if not valid(pawn) then
         return
     end
-    chiRenDataProbeDone = true
-    local set = readField(pawn, "AttributeSetBase")
-    DumpPropertyNames("chiren attrs", set)
-    DumpNumberFields("chiren attrs", set, CHARGE_FIELD_CANDIDATES)
-    local passives = safe(FindAllOf, "GA_Hun_ChiRen_Passive_C")
+    -- The passive showed up ~113 s after the pawn became valid last run, so the retry budget has to
+    -- outlast that. FindAllOf walks the whole object array: only run it every third tick.
+    ChiRenSwitchProbe.tries = ChiRenSwitchProbe.tries + 1
+    local passives = nil
+    if ChiRenSwitchProbe.tries % 3 == 0 then
+        passives = safe(FindAllOf, "GA_Hun_ChiRen_Passive_C")
+    end
     if not passives or #passives == 0 then
-        LogEvent("chiren data: no passive instance")
+        if ChiRenSwitchProbe.tries >= 240 then
+            chiRenDataProbeDone = true
+            LogEvent("chiren data: no passive instance after %d tries", ChiRenSwitchProbe.tries)
+        end
         return
     end
+    chiRenDataProbeDone = true
     for i, passive in ipairs(passives) do
         if i > 3 then
             break
@@ -2704,18 +3192,45 @@ local function ProbeChiRenData()
                 LogEvent("chiren passive %s: %s", field, tostring(readNumber(passive, field)))
             end
             local burningTag = readField(passive, "BurningStateTag")
-            local tagName = valid(burningTag) and TagText(burningTag) or tostring(burningTag)
+            local tagName = TagText(burningTag)
             LogEvent("chiren passive BurningStateTag: %s", tagName)
+            LogEvent("chiren passive MainWeaponSlotTag: %s",
+                TagText(readField(passive, "MainWeaponSlotTag")))
             local row = readField(passive, "BurningChargeTableRow")
-            LogEvent("chiren passive BurningChargeTableRow: %s", tostring(row))
+            LogEvent("chiren passive BurningChargeTableRow: %s", ProbeValue(row))
             local ge = readField(passive, "FireStateGE")
-            LogEvent("chiren passive FireStateGE: %s", valid(ge) and FullName(ge) or tostring(ge))
+            LogEvent("chiren passive FireStateGE: %s", ProbeValue(ge))
             local charge = readField(passive, "BurningChargeObject")
-            LogEvent("chiren passive BurningChargeObject: %s", valid(charge) and FullName(charge) or tostring(charge))
+            LogEvent("chiren passive BurningChargeObject: %s", ProbeValue(charge))
             DumpPropertyNames("chiren charge", charge)
             DumpNumberFields("chiren charge", charge, CHARGE_FIELD_CANDIDATES)
+            if i == 1 then
+                ChiRenSwitchProbe.passive = passive
+                ChiRenSwitchProbe.charge = charge
+                ChiRenSwitchProbe.tagName = tagName
+                -- The real stack field name is unknown, so pick the plausible numeric ones out of
+                -- the class instead of guessing a single name.
+                local cls = safe(function() return charge:GetClass() end)
+                if valid(cls) then
+                    pcall(function()
+                        cls:ForEachProperty(function(prop)
+                            local name = safe(function() return prop:GetFName():ToString() end)
+                            if not name then return end
+                            for _, key in ipairs({ "Charge", "Energy", "Stack", "Layer", "Count",
+                                "Level", "Value", "Num" }) do
+                                if name:find(key, 1, true) then
+                                    ChiRenSwitchProbe.fields[#ChiRenSwitchProbe.fields + 1] = name
+                                    return
+                                end
+                            end
+                        end)
+                    end)
+                end
+                LogEvent("chiren switch probe: watching %d charge fields, tag=%s",
+                    #ChiRenSwitchProbe.fields, tagName)
+            end
             local abilities = readField(pawn, "AbilitySystemComponent")
-            if valid(abilities) and tagName and tagName ~= "nil" then
+            if valid(abilities) and tagName and tagName ~= "nil" and tagName ~= "?" then
                 local count = safe(function()
                     return abilities:GetGameplayTagCount({ TagName = FName(tagName, EFindName.FNAME_Add) })
                 end)
@@ -2725,6 +3240,48 @@ local function ProbeChiRenData()
     end
 end
 
+-- Runs on the 1.5 s hook loop rather than the 300 ms sampler: extra reflection at high frequency is
+-- the known crash family. The switch signal is SWT_C's own activation count and the fire state comes
+-- from the pawn's ASC with the tag name the mod already uses: last run the passive's ASC lookup and
+-- the weapon tag container both yielded nothing, which is why zero snapshots were logged.
+local function ProbeChiRenSwitch()
+    local st = ChiRenSwitchProbe
+    if st.logs >= 60 then
+        return
+    end
+    local pawn = GetPlayerPawn()
+    if not valid(pawn) then
+        return
+    end
+    local asc = readField(pawn, "AbilitySystemComponent")
+    if not valid(asc) then
+        return
+    end
+    local now = os.clock()
+    local fire = tostring(safe(function()
+        return asc:GetGameplayTagCount({ TagName = BURNING_FNAME })
+    end))
+    local parts = {}
+    if valid(st.charge) then
+        for _, name in ipairs(st.fields) do
+            parts[#parts + 1] = name .. "=" .. tostring(readNumber(st.charge, name))
+        end
+    end
+    local snapshot = string.format("fireTagCount=%s charge[%s]", fire, table.concat(parts, ","))
+    local activations = SWITCH_BLOCK.activations
+    if activations ~= st.lastActivations then
+        st.lastActivations = activations
+        st.watchUntil = now + 6.0
+        st.logs = st.logs + 2
+        ProbeLog("chiren SWITCH before: %s", st.prevSnapshot or "?")
+        ProbeLog("chiren SWITCH after: %s", snapshot)
+    elseif now <= st.watchUntil then
+        st.logs = st.logs + 1
+        ProbeLog("chiren watch: %s", snapshot)
+    end
+    st.prevSnapshot = snapshot
+end
+
 local function Tick()
     TryDeflectHook()
     TryHitreactHook()
@@ -2732,9 +3289,11 @@ local function Tick()
     TryNativeGeHook()
     TryBlockHook()
     TryMontageHook()
-    TryAbilityHook()
     HookChiRenGas()
     ProbeChiRenData()
+    if Settings.ProbeSwitchAttack then
+        ProbeChiRenSwitch()
+    end
     for _, name in ipairs(HEAVY_CLASSES) do
         HookHeavy(name)
     end
@@ -2743,6 +3302,7 @@ local function Tick()
     end
     TuneDeflectWindow()
     TryClashWindowHook()
+    ProbeSwitchInstances()
     ProbeOnce()
     ProbeHitStateGes()
     ProbeAnimSets()
@@ -2757,6 +3317,8 @@ end
 local function SampleSafe()
     local ok, err = pcall(CheckBurning)
     if not ok then logError(err) end
+    local keepOk, keepErr = pcall(KeepTick)
+    if not keepOk then logError(keepErr) end
     local dmgOk, dmgErr = pcall(TickDamage, os.clock())
     if not dmgOk then logError(dmgErr) end
 end

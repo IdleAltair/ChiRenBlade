@@ -1297,7 +1297,7 @@ end
 
 local lastBlockImpactAt = 0
 local lastAttackAt = 0
-local blockHooked = false
+local blockHookState = { hooked = false, attempts = 0 }
 
 ---------------------------------------------------------------------------------------------------------------------
 -- 风回云卷 (GA_Hun_ChiRen_BSup): clash streak and blade-force tier
@@ -1718,24 +1718,26 @@ local function HookChiRenGas()
 end
 
 local function TryBlockHook()
-    if blockHooked then
+    if blockHookState.hooked or blockHookState.attempts >= 20 then
         return
     end
-    local stances = safe(FindAllOf, "BP_StanceAction_Base_Player_C")
-    if not stances or #stances == 0 then
-        return
-    end
-    local path = classPathOf(stances[1])
-    if not path then
-        return
-    end
-    local ok, err = pcall(RegisterHook, path .. ":On Impact", function()
-        lastBlockImpactAt = os.clock()
-    end)
+    -- The Impact UFunction lives on the stance action class itself, not on the owning ability that
+    -- FindAllOf happens to return first (GA_Hun_Long_Stance_C has no On Impact). Use the fixed class
+    -- path, matching the heavenorhell reference that hooks this successfully.
+    local ok, err = pcall(RegisterHook,
+        "/PBZDeflectSystem/Abilities/BP_StanceAction_Base_Player.BP_StanceAction_Base_Player_C:On Impact",
+        function()
+            lastBlockImpactAt = os.clock()
+        end)
     if ok then
-        blockHooked = true
+        blockHookState.hooked = true
+        LogEvent("block probe: hooked On Impact")
+    else
+        blockHookState.attempts = blockHookState.attempts + 1
+        if blockHookState.attempts >= 20 then
+            logError("block probe: hook failed after 20 tries: " .. tostring(err))
+        end
     end
-    LogEvent("block probe: hook ok=%s%s", tostring(ok), ok and "" or (" err=" .. tostring(err)))
 end
 
 ---------------------------------------------------------------------------------------------------------------------

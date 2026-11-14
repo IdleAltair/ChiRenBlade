@@ -56,13 +56,13 @@ return {
     --
     -- Inject route (SwitchDeflectInject): the switch attack has no native deflect row, so its first
     -- 0.858 s cannot parry at all. This injects a GAA_DeflectFrame_C row at start=0, giving the move
-    -- a native counter window like the heavy->light counter. Window in frames at 30 fps (10 = 0.333 s,
-    -- close to the counter's 0.3506 s). 0 = off. ChiRen only.
+    -- a native counter window like the heavy->light counter. Window in frames at 30 fps (15 = 0.5 s,
+    -- the tested feel-good value; the vanilla counter is ~0.35 s). 0 = off. ChiRen only.
     -- 注入路线（SwitchDeflectInject）：切武攻击天生没有弹反帧行，前 0.858 秒完全不能格挡。
     -- 这里在 start=0 注入一行 GAA_DeflectFrame_C，让切武攻击像重击接轻击反击那样拥有原生拼刀窗口。
-    -- 窗口单位是 30fps 下的帧数（10 帧 ≈ 0.333 秒，接近反击的 0.3506 秒）。0 = 关闭。只影响炽刃。
+    -- 窗口单位是 30fps 下的帧数（15 帧 = 0.5 秒，实测手感值；原版反击约 0.35 秒）。0 = 关闭。只影响炽刃。
     SwitchDeflectInject = true,
-    SwitchDeflectFrames = 10,
+    SwitchDeflectFrames = 15,
 
     -- The injected deflect frame's spatial gate and red-light acceptance. Angle is the front cone in
     -- degrees (1-360): 120 = the shipped front cone, 360 = all directions around you. RedEye false =
@@ -197,9 +197,18 @@ return {
     ClashSlowmoSpeed = 0.3,
     ClashSlowmoSeconds = 0.4,
 
-    -- Write clash, free-attack, cost and fire lines to UE4SS.log.
-    -- 把拼刀、免耗、消耗和火焰时长写进 UE4SS.log。
-    LogEvents = true,
+    -- Key functional events only (clash grants, tornado, invuln, fire, keep-tier, hook registration,
+    -- player change). Low-frequency, on by default so a released build still leaves enough to locate
+    -- bugs without the per-hit diagnostic spam.
+    -- 只记关键功能事件（拼刀授予、龙卷、无敌、火焰、保层、hook 注册、角色切换）。低频、默认开，
+    -- 发布版也能留下足够定位 bug 的信息，又不刷每跳诊断。
+    LogImportant = true,
+
+    -- Full diagnostic detail (per-hit samples, invuln steps, burning counts, cost numbers, probes).
+    -- Off by default for normal play (less log I/O); turn on to debug a specific problem.
+    -- 全量诊断细节（每跳受击采样、无敌每步、燃烧计数、消耗数值、探测）。默认关以减少日志开销；
+    -- 排查具体问题时再打开。
+    LogEvents = false,
 
     -- Log each action's damage ("damage hit: ..." per hit, "action damage: ..." per action).
     -- The damage is sampled from the nearest enemy's Health every 0.1 s and credited to the action

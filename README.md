@@ -90,7 +90,7 @@ Restart the game after a change.
 | `DeflectWindowFrames` | `0` | 0-60 | Perfect window of the **block parry** in frames at 30 fps (game value 6). Not the weapon clash. `0` = no change. |
 | `ClashWindowFrames` | `0` | 0-60 | Weapon **clash** window of the heavy -> light counter, in frames at 30 fps (vanilla 0.350606441 s, about 10.5). ChiRen only. `0` = no change. |
 | `SwitchDeflectInject` | `true` | - | Inject a native deflect frame into the ChiRen switch attack so it can parry during startup. ChiRen only. |
-| `SwitchDeflectFrames` | `10` | 0-60 | Switch-attack parry window in frames at 30 fps (10 ≈ 0.333 s). `0` = off. |
+| `SwitchDeflectFrames` | `15` | 0-60 | Switch-attack parry window in frames at 30 fps (15 = 0.5 s, the tested feel-good value). `0` = off. |
 | `SwitchDeflectAngle` | `120` | 1-360 | Switch-attack parry cone in degrees: 120 = front, 360 = all directions around you. |
 | `SwitchDeflectRedEye` | `false` | - | `true` lets the switch parry also deflect red-light attacks (normally dodge-only). |
 | `SwitchKeepStacks` | `true` | - | Keep ChiRen blade stacks (刀劲) across a weapon switch. |
@@ -112,7 +112,8 @@ Restart the game after a change.
 | `ClashSlowmoEnabled` | `false` | - | Extra world slow-down on a successful clash, on top of the game's own clash slow-motion. You slow with the world. |
 | `ClashSlowmoSpeed` | `0.3` | 0.05-1.0 | World speed during the clash slow-down (0.3 = 30 %). |
 | `ClashSlowmoSeconds` | `0.4` | 0.05-2.0 | Real seconds the clash slow-down lasts. |
-| `LogEvents` | `true` | - | Write clash, free-attack, cost and fire lines to `UE4SS.log`. |
+| `LogImportant` | `true` | - | Key functional events only (clash grants, tornado, invuln, fire, keep-tier, hooks, player change). Low-frequency, on by default so a released build still leaves enough to locate bugs. |
+| `LogEvents` | `false` | - | Full diagnostic detail (per-hit samples, invuln steps, cost numbers, probes). Turn on to debug a specific problem. |
 | `LogDamage` | `false` | - | Write damage lines and sample the enemy's health. Turn on to debug damage. |
 | `ProbeSwitchAttack` | `false` | - | Temporary read-only probe of switch/counter timelines. Leave off. |
 
@@ -131,7 +132,7 @@ return {
     DeflectWindowFrames = 0,
     ClashWindowFrames = 0,
     SwitchDeflectInject = true,
-    SwitchDeflectFrames = 10,
+    SwitchDeflectFrames = 15,
     SwitchDeflectAngle = 120,
     SwitchDeflectRedEye = false,
     SwitchKeepStacks = true,
@@ -153,7 +154,8 @@ return {
     ClashSlowmoEnabled = false,
     ClashSlowmoSpeed = 0.3,
     ClashSlowmoSeconds = 0.4,
-    LogEvents = true,
+    LogImportant = true,
+    LogEvents = false,
     LogDamage = false,
     ProbeSwitchAttack = false,
 }
@@ -236,7 +238,8 @@ one.
 ## Credits
 
 Written by Altair. Main contributors: DeepSeek-V4.1-Flash-1017 and Qwen4-Max-Preview (both via the Qoder model
-selector). Supporting contributors: Gemini (Argon) and Kimi (K3.1 Pro).
+selector). Supporting contributors: Gemini (Argon), Kimi (K3.1 Pro), GPT-6.1-Sol and Gemini Hydrogen (the last two
+via the stability-candidate review).
 
 ## License
 
@@ -317,7 +320,7 @@ selector). Supporting contributors: Gemini (Argon) and Kimi (K3.1 Pro).
 | `DeflectWindowFrames` | `0` | 0-60 | **格挡弹反**的完美窗口帧数（30 fps），游戏原值 6。`0` = 不改。 |
 | `ClashWindowFrames` | `0` | 0-60 | **拼刀**（重击接轻击派生）的判定窗口帧数（30fps），原版 0.350606441 秒 ≈ 10.5 帧。只对炽刃生效。`0` = 不改。 |
 | `SwitchDeflectInject` | `true` | - | 给炽刃切武攻击注入原生弹反帧，让起手就能弹反。只对炽刃生效。 |
-| `SwitchDeflectFrames` | `10` | 0-60 | 切武弹反窗口帧数（30fps），10 ≈ 0.333 秒。`0` = 关闭。 |
+| `SwitchDeflectFrames` | `15` | 0-60 | 切武弹反窗口帧数（30fps），15 = 0.5 秒（实测手感值）。`0` = 关闭。 |
 | `SwitchDeflectAngle` | `120` | 1-360 | 切武弹反判定角度：120 = 前方扇形，360 = 全身全向。 |
 | `SwitchDeflectRedEye` | `false` | - | `true` 让切武弹反也能弹红光（游戏里红光本来只能闪避）。 |
 | `SwitchKeepStacks` | `true` | - | 切武器后保留炽刃刀劲层数。 |
@@ -339,13 +342,16 @@ selector). Supporting contributors: Gemini (Argon) and Kimi (K3.1 Pro).
 | `ClashSlowmoEnabled` | `false` | - | 拼刀成功时在游戏自带放缓之上再叠一层全世界放缓；玩家也跟着慢。 |
 | `ClashSlowmoSpeed` | `0.3` | 0.05-1.0 | 放缓期间的世界速度（0.3 = 30%）。 |
 | `ClashSlowmoSeconds` | `0.4` | 0.05-2.0 | 放缓持续的真实秒数。 |
-| `LogEvents` | `true` | - | 是否把拼刀、免耗、杀气消耗和火焰时长写进 `UE4SS.log`。 |
+| `LogImportant` | `true` | - | 只记关键功能事件（拼刀授予、龙卷、无敌、火焰、保层、hook、角色切换）。低频、默认开，发布版也够定位 bug。 |
+| `LogEvents` | `false` | - | 全量诊断细节（每跳采样、无敌每步、消耗数值、探测）。排查具体问题时再打开。 |
 | `LogDamage` | `false` | - | 是否写伤害日志并采样敌人血量。排查伤害时再打开。 |
 | `ProbeSwitchAttack` | `false` | - | 切武/反击时间轴的临时只读探测。保持关闭。 |
 
 范围外的值会保留默认值，日志会说明是哪一项。
 
 ### 日志示例
+
+默认只输出 `LogImportant` 关键事件；`damage hit` / `damage watch` 需 `LogDamage = true`，每跳诊断需 `LogEvents = true`。下面展示各级可能出现的行：
 
 ```
 [ChiRenBlade] 1.0 loaded

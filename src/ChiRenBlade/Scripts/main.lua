@@ -148,11 +148,16 @@ end
 
 
 function STABILITY.DiscoveryReady(key)
-    local state = STABILITY.discovery[key] or { delay = 1.5, nextAt = 0 }
+    -- Stagger first expiry by key length so the 18 heavy/attack lookups do not all fire on the same
+    -- frame (a burst of FindAllOf over the global object array spikes the game thread on a fresh save).
+    local state = STABILITY.discovery[key] or { delay = 1.5, nextAt = (#key % 7) * 0.4 }
     local now = os.clock()
     if now < state.nextAt then return false end
     state.nextAt = now + state.delay
-    state.delay = math.min(state.delay * 2, 30)
+    -- A class that never loads (skills not yet unlocked on a new playthrough) must keep retrying so it
+    -- hooks once unlocked, but only rarely: 60s cap halves the old 30s steady-state FindAllOf cost
+    -- while keeping the worst-case hook registration delay under a minute.
+    state.delay = math.min(state.delay * 2, 60)
     STABILITY.discovery[key] = state
     return true
 end
@@ -3779,7 +3784,9 @@ function STABILITY.StartLoop(delay, callback)
     if not ok then logError("timer registration failed: " .. tostring(err)) end
 end
 
-STABILITY.StartLoop(1500, TickSafe)
+-- Discovery only finds classes and registers hooks; once hooked, combat runs event-driven. A slower
+-- sweep halves the periodic FindAllOf cost on fresh saves without delaying any registered hook.
+STABILITY.StartLoop(3000, TickSafe)
 STABILITY.StartLoop(300, SampleSafe)
 if Settings.ClashSlowmoEnabled then
     STABILITY.StartLoop(16, CLASH_SLOWMO.frameStep)

@@ -2432,6 +2432,9 @@ end
 local function HookHeavy(name)
     if hookedHeavy[name] then return end
     if not STABILITY.DiscoveryReady("heavy:" .. name) then return end
+    -- B/BBB keep their event graph on a parent class, so a missing K2_ActivateAbility on the child is
+    -- expected and resolved by the parent fallback below; only a failed fallback is a real error.
+    local isParentFallback = name == "GA_Hun_ChiRen_B_C" or name == "GA_Hun_ChiRen_BBB_C"
     local objects = safe(FindAllOf, name)
     if not objects or #objects == 0 then return end
     local classPath = classPathOf(objects[1])
@@ -2444,8 +2447,12 @@ local function HookHeavy(name)
         anyOk = true
         LogKey("hooked heavy %s", name)
     else
-        logError("heavy hook " .. name .. ": " .. tostring(err))
-        if name == "GA_Hun_ChiRen_B_C" or name == "GA_Hun_ChiRen_BBB_C" then
+        if isParentFallback then
+            LogEvent("heavy hook %s: %s (event graph on parent; falling back)", name, tostring(err))
+        else
+            logError("heavy hook " .. name .. ": " .. tostring(err))
+        end
+        if isParentFallback then
             local classObj = safe(function() return objects[1]:GetClass() end)
             local parent = valid(classObj) and readField(classObj, "SuperStruct") or nil
             if valid(parent) then
@@ -2498,9 +2505,15 @@ local function HookHeavy(name)
     end
     if anyOk then
         hookedHeavy[name] = true
+        if not ok then
+            LogKey("hooked heavy %s (via parent)", name)
+        end
     else
         if STABILITY.HookExhausted(classPath .. ":K2_ActivateAbility") then
             hookedHeavy[name] = true
+            if isParentFallback then
+                logError("heavy hook " .. name .. ": parent fallback also failed: " .. tostring(err))
+            end
         end
     end
     if name == "GA_Hun_ChiRen_BSup_C" and not hookedHeavy[name .. "_end"] then
@@ -2552,12 +2565,28 @@ local function HookAttack(name)
     end)
     if ok then
         hookedAttack[name] = true
+        STABILITY.attackHookedOk = (STABILITY.attackHookedOk or 0) + 1
         LogKey("hooked attack %s", name)
     else
         if STABILITY.HookExhausted(classPath .. ":K2_ActivateAbility") then
             hookedAttack[name] = true
         end
-        logError("attack hook " .. name .. ": " .. tostring(err))
+        -- Light-attack hooks only refresh lastAttackAt (the clash check falls back to stance) and feed
+        -- the damage log, so a missing one is diagnostic, not a functional error.
+        LogEvent("attack hook %s: %s", name, tostring(err))
+    end
+    if not STABILITY.attackSummaryLogged then
+        local allDone = true
+        for _, n in ipairs(ATTACK_CLASSES) do
+            if not hookedAttack[n] then
+                allDone = false
+                break
+            end
+        end
+        if allDone then
+            STABILITY.attackSummaryLogged = true
+            LogKey("attack hooks: %d/%d active", STABILITY.attackHookedOk or 0, #ATTACK_CLASSES)
+        end
     end
 end
 
@@ -2772,10 +2801,17 @@ local function KeepTick()
     end
     if valid(chirenWeaponAsset) then
         local equipTags = readField(chirenWeaponAsset, "Weapon Equip Tags")
+        -- During a world swap the cached weapon asset can stay valid while its GameplayTags container
+        -- turns into a TrivialObject; skip silently rather than log a transient ForEach error.
+        local tags = nil
         if equipTags ~= nil then
+            local okTags, container = pcall(function() return equipTags.GameplayTags end)
+            if okTags then tags = container end
+        end
+        if valid(tags) then
             local found, active = false, false
             safe(function()
-                equipTags.GameplayTags:ForEach(function(_, ref)
+                tags:ForEach(function(_, ref)
                     local tag = ref:get()
                     local text = safe(function() return tag.TagName:ToString() end)
                     if text == CHIREN_EQUIP_TAG then

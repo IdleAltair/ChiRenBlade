@@ -23,6 +23,11 @@ notes/
                   a non-mod cause of "the boss takes no damage"
   break-research.md
                   early research on the poise/break system
+  damage-burning-and-death.md
+                  why a raw attribute write freezes the boss bar, why writing 0 HP
+                  makes a boss unkillable, and how native damage/burning actually work
+  shachi-cost.md  why "free" heavies still charged sha-chi (the cost fields are ignored;
+                  reduction is a refund) and the fix
 ```
 
 ## Regenerate the schema

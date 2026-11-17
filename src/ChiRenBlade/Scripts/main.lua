@@ -67,10 +67,37 @@ local DEFAULTS = {
     ClashSlowmoEnabled = false,
     ClashSlowmoSpeed = 0.3,
     ClashSlowmoSeconds = 0.4,
+    SwitchSlowmoEnabled = true,
+    SwitchSlowmoSpeed = 0.6,
+    SwitchSlowmoSeconds = 0.2,
+    SlowmoRushSpeed = 1.0,
+    SlowmoRushSeconds = 0.15,
+    SwitchTornadoEnabled = true,
+    SwitchTornadoDelaySeconds = 0.6,
+    SwitchTornadoDistance = 215,
+    SwitchTornadoDrop = 120,
+    SwitchTornadoDamageScale = 2.0,
+    SwitchTornadoDamageBase = 1100,
+    SwitchTornadoRadius = 300,
+    SwitchTornadoAngle = 360,
+    SwitchTornadoTicks = 16,
+    SwitchTornadoTickSeconds = 2.0,
+    SwitchTornadoCalibratedAttack = 100,
+    SwitchTornadoSpeed = 600,
+    SwitchTornadoBurnSeconds = 5,
+    SwitchTornadoBurnEvery = 4,
+    TestDamageScale = 1,
+    TestNativeFinish = false,
+    SwitchTornadoStopDistance = 100,
     LogImportant = true,
     LogEvents = false,
     LogDamage = false,
     ProbeSwitchAttack = false,
+    ProbeBurnVisual = false,
+    ProbeCombatApi = false,
+    TestBurnAttach = false,
+    EnemyBurnVisual = true,
+    ProbeNativeFinish = false,
 }
 
 -- The game's global combat config asset holds the block-parry perfect window.
@@ -257,6 +284,10 @@ local function readNumber(object, name)
     return nil
 end
 
+function STABILITY.IsFiniteNumber(value)
+    return type(value) == "number" and value == value and math.abs(value) < math.huge
+end
+
 local function ResolveObject(path)
     local object = safe(StaticFindObject, path)
     if valid(object) then return object end
@@ -287,6 +318,24 @@ local LIMITS = {
     BreakHoldSeconds = { 0, 3 },
     ClashSlowmoSpeed = { 0.05, 1.0 },
     ClashSlowmoSeconds = { 0.05, 2.0 },
+    SwitchSlowmoSpeed = { 0.05, 1.0 },
+    SwitchSlowmoSeconds = { 0.05, 2.0 },
+    SlowmoRushSpeed = { 1.0, 3.0 },
+    SlowmoRushSeconds = { 0.05, 1.0 },
+    SwitchTornadoDelaySeconds = { 0, 3 },
+    SwitchTornadoDistance = { 0, 600 },
+    SwitchTornadoDrop = { 0, 300 },
+    SwitchTornadoDamageScale = { 0, 5 },
+    SwitchTornadoDamageBase = { 0, 20000 },
+    SwitchTornadoRadius = { 0, 1000 },
+    SwitchTornadoAngle = { 1, 360 },
+    SwitchTornadoTicks = { 1, 20 },
+    SwitchTornadoTickSeconds = { 0.2, 3.0 },
+    SwitchTornadoCalibratedAttack = { 1, 10000 },
+    SwitchTornadoSpeed = { 0, 1000 },
+    SwitchTornadoBurnSeconds = { 0, 30 },
+    SwitchTornadoBurnEvery = { 1, 20 },
+    SwitchTornadoStopDistance = { 0, 500 },
 }
 
 local Settings = {}
@@ -318,7 +367,7 @@ if okConfig and type(config) == "table" then
                 tostring(default)))
         else
             local limit = LIMITS[name]
-            if limit and (value < limit[1] or value > limit[2]) then
+            if limit and (not STABILITY.IsFiniteNumber(value) or value < limit[1] or value > limit[2]) then
                 log(string.format("config.lua: %s must be from %s to %s; the default %s is used.", name,
                     tostring(limit[1]), tostring(limit[2]), tostring(default)))
             else
@@ -461,7 +510,7 @@ local function CheckBurning()
                     if type(TryFire) == "function" then
                         TryFire(true, remaining)
                     end
-                    LogKey("fire: cleared by a hit, reapplied %.1f s", remaining)
+                    LogEvent("fire: cleared by a hit, reapplied %.1f s", remaining)
                 end
             else
                 LogEvent("fire lasted %.2f s (last target %.1f)", now - fireAppliedAt,
@@ -520,6 +569,50 @@ local function ResolveFireGe()
     return nil
 end
 
+-- GameplayEffect defaults are shared assets. Never apply a timed effect unless its temporary
+-- duration override was both writable and readable; otherwise a reflection mismatch could leave
+-- the effect at its asset default (including an unintended infinite duration).
+function SetTemporaryDuration(magnitude, seconds, label)
+    if STABILITY.durationOverridesBroken or not STABILITY.IsFiniteNumber(seconds) or seconds <= 0 then return nil end
+    local originalCalc = readField(magnitude, "MagnitudeCalculationType")
+    local originalValue = safe(function() return magnitude.ScalableFloatMagnitude.Value end)
+    if not STABILITY.IsFiniteNumber(originalCalc) or not STABILITY.IsFiniteNumber(originalValue) then
+        LogEvent("%s: duration default unreadable; effect skipped", label)
+        return nil
+    end
+    local function restore()
+        -- Do not overwrite a value another callback changed while the GE was being applied.
+        local calc = readField(magnitude, "MagnitudeCalculationType")
+        local value = safe(function() return magnitude.ScalableFloatMagnitude.Value end)
+        if calc == 0 then pcall(function() magnitude.MagnitudeCalculationType = originalCalc end) end
+        if STABILITY.IsFiniteNumber(value) and math.abs(value - seconds) <= 0.001 then
+            pcall(function() magnitude.ScalableFloatMagnitude.Value = originalValue end)
+        end
+        local afterCalc = readField(magnitude, "MagnitudeCalculationType")
+        local afterValue = safe(function() return magnitude.ScalableFloatMagnitude.Value end)
+        local restored = afterCalc == originalCalc and STABILITY.IsFiniteNumber(afterValue)
+            and math.abs(afterValue - originalValue) <= 0.001
+        if not restored then
+            -- A shared asset left uncertain must not become the baseline for another override.
+            STABILITY.durationOverridesBroken = true
+            logError(label .. ": duration restore failed or changed externally; temporary GE duration overrides disabled")
+        end
+        return restored
+    end
+    local okCalc, errCalc = pcall(function() magnitude.MagnitudeCalculationType = 0 end)
+    local okValue, errValue = pcall(function() magnitude.ScalableFloatMagnitude.Value = seconds end)
+    local writtenCalc = readField(magnitude, "MagnitudeCalculationType")
+    local writtenValue = safe(function() return magnitude.ScalableFloatMagnitude.Value end)
+    if not okCalc or not okValue or writtenCalc ~= 0 or not STABILITY.IsFiniteNumber(writtenValue)
+        or math.abs(writtenValue - seconds) > 0.001 then
+        restore()
+        LogEvent("%s: duration override rejected; effect skipped (%s)", label,
+            tostring(not okCalc and errCalc or (not okValue and errValue or "readback mismatch")))
+        return nil
+    end
+    return restore
+end
+
 TryFire = function(force, duration)
     if not Settings.FireEnabled then
         return
@@ -571,36 +664,23 @@ TryFire = function(force, duration)
         LogEvent("fire: no DurationMagnitude")
         return
     end
-    local originalCalc = readField(magnitude, "MagnitudeCalculationType")
-    local originalValue = safe(function() return magnitude.ScalableFloatMagnitude.Value end)
-    local setCalc, calcError = pcall(function() magnitude.MagnitudeCalculationType = 0 end)
-    local setValue, valueError = pcall(function() magnitude.ScalableFloatMagnitude.Value = applySeconds end)
-    if not setCalc then
-        LogEvent("fire: could not switch the duration calculation (%s)", tostring(calcError))
-    end
-    if not setValue then
-        LogEvent("fire: could not write the duration (%s)", tostring(valueError))
-    end
+    local restoreDuration = SetTemporaryDuration(magnitude, applySeconds, "fire")
+    if not restoreDuration then return end
     local ok, err = pcall(function()
         abilities:BP_ApplyGameplayEffectToSelf(ge, 1.0, context)
     end)
-    if originalCalc ~= nil then
-        pcall(function() magnitude.MagnitudeCalculationType = originalCalc end)
-    end
-    if originalValue ~= nil then
-        pcall(function() magnitude.ScalableFloatMagnitude.Value = originalValue end)
-    end
+    restoreDuration()
     if ok then
         if force then
-            LogKey("fire: reapplied for %.1f s", applySeconds)
+            LogEvent("fire: reapplied for %.1f s", applySeconds)
         else
             fireAppliedAt = os.clock()
             fireUntil = fireAppliedAt + applySeconds
             fireAskedSeconds = applySeconds
-            LogKey("fire: applied, asked %.1f s", applySeconds)
+            LogEvent("fire: applied, asked %.1f s", applySeconds)
         end
     else
-        LogEvent("fire: BP_ApplyGameplayEffectToSelf failed (%s)", tostring(err))
+        logError("fire apply failed: " .. tostring(err))
     end
 end
 
@@ -653,10 +733,8 @@ local function ApplyTimedGe(abilities, ge, seconds)
         LogEvent("ge: %s has no DurationMagnitude", FullName(ge))
         return nil
     end
-    local originalCalc = readField(magnitude, "MagnitudeCalculationType")
-    local originalValue = safe(function() return magnitude.ScalableFloatMagnitude.Value end)
-    pcall(function() magnitude.MagnitudeCalculationType = 0 end)
-    pcall(function() magnitude.ScalableFloatMagnitude.Value = seconds end)
+    local restoreDuration = SetTemporaryDuration(magnitude, seconds, "timed GE")
+    if not restoreDuration then return nil end
     local context = safe(function() return abilities:MakeEffectContext() end)
     local ok, result = false, nil
     if context then
@@ -664,14 +742,9 @@ local function ApplyTimedGe(abilities, ge, seconds)
             return abilities:BP_ApplyGameplayEffectToSelf(ge, 1.0, context)
         end)
     end
-    if originalCalc ~= nil then
-        pcall(function() magnitude.MagnitudeCalculationType = originalCalc end)
-    end
-    if originalValue ~= nil then
-        pcall(function() magnitude.ScalableFloatMagnitude.Value = originalValue end)
-    end
+    restoreDuration()
     if not ok then
-        LogEvent("ge: apply failed (%s)", tostring(context and result or "no effect context"))
+        logError("effect apply failed: " .. tostring(context and result or "no effect context"))
         return nil
     end
     return result
@@ -784,7 +857,7 @@ local function SkipHitreact(name, context, ...)
                     if type(TryFire) == "function" then
                         TryFire(true, remaining)
                     end
-                    LogKey("fire: hit cleared it, reapplied %.1f s", remaining)
+                    LogEvent("fire: hit cleared it, reapplied %.1f s", remaining)
                 end
             end
         end
@@ -948,7 +1021,8 @@ local function RemoveInvuln()
         local ok, err = pcall(function()
             owner.asc:RemoveActiveGameplayEffect(invulnHandle, 1)
         end)
-        LogKey("invuln: removed ok=%s%s", tostring(ok), ok and "" or (" err=" .. tostring(err)))
+        if not ok then logError("invuln removal failed: " .. tostring(err)) end
+        LogEvent("invuln: removed ok=%s%s", tostring(ok), ok and "" or (" err=" .. tostring(err)))
     end
     invulnHandle = nil
     STABILITY.invulnOwner = nil
@@ -972,7 +1046,7 @@ local function TryInvulnerable(seconds)
     StartHealthGuard(seconds)
     local ge = ResolveInvulnGe()
     if not ge then
-        LogEvent("invuln: no invulnerability GE found")
+        logError("invuln unavailable: no invulnerability GE found")
         return
     end
     invulnToken = invulnToken + 1
@@ -985,7 +1059,7 @@ local function TryInvulnerable(seconds)
     end
     invulnHandle = result
     STABILITY.invulnOwner = { asc = abilities, key = STABILITY.PlayerKey() }
-    LogKey("invuln: applied %.1f s handle=%s tag %s -> %s", seconds, HandleText(result),
+    LogEvent("invuln: applied %.1f s handle=%s tag %s -> %s", seconds, HandleText(result),
         tostring(before), tostring(InvulnerableCount(abilities)))
     LogInvulnTags(abilities, "apply")
     STABILITY.After(math.floor(seconds * 1000), function()
@@ -995,7 +1069,7 @@ local function TryInvulnerable(seconds)
         RemoveInvuln()
         local pawn = GetPlayerPawn()
         local abilities = valid(pawn) and readField(pawn, "AbilitySystemComponent") or nil
-        LogKey("invuln: ended, tag=%s", tostring(InvulnerableCount(abilities)))
+        LogEvent("invuln: ended, tag=%s", tostring(InvulnerableCount(abilities)))
     end)
 end
 
@@ -1015,8 +1089,6 @@ local NATIVE_INVULN_PATHS = {
     "/PBZCombatAsset/Prototypes/GameplayEffects/GE_PBZSpecialMoveInvulnerable.GE_PBZSpecialMoveInvulnerable_C",
 }
 local nativeInvulnProbeDone = false
-local nativeGeHooked = false
-local nativeGeLogs = 0
 
 local function TagText(value)
     if value == nil then
@@ -1080,46 +1152,6 @@ local function TryNativeInvulnProbe()
     end
 end
 
--- The talent applies its effect through the ability system, so watching the player's own applies
--- reveals the real asset path even when the class was not loaded at start-up.
-local function TryNativeGeHook()
-    if nativeGeHooked then
-        return
-    end
-    local pawn = GetPlayerPawn()
-    local abilities = valid(pawn) and readField(pawn, "AbilitySystemComponent") or nil
-    if not valid(abilities) then
-        return
-    end
-    nativeGeHooked = true
-    local function onApply(context, ge, level, effectContext)
-        if nativeGeLogs >= 200 then
-            return
-        end
-        local self = Unwrap(context)
-        local owner = safe(function() return self:GetOuter() end)
-        if not IsPlayerActor(owner) then
-            return
-        end
-        local geObject = Unwrap(ge)
-        nativeGeLogs = nativeGeLogs + 1
-        local name = valid(geObject) and FullName(geObject) or tostring(geObject)
-        LogEvent("native probe: GE apply %s", name)
-        if name:find("Invulnerable", 1, true) or name:find("Endure", 1, true) then
-            LogGeTags(geObject, name)
-        end
-    end
-    -- The BP helper lives on the native class; a Blueprint subclass path cannot resolve it globally.
-    local ok, err = STABILITY.TryRegisterHook(
-        "/Script/GameplayAbilities.AbilitySystemComponent:BP_ApplyGameplayEffectToSelf", onApply)
-    if not ok then
-        local path = classPathOf(abilities)
-        if path then
-            ok, err = STABILITY.TryRegisterHook(path .. ":BP_ApplyGameplayEffectToSelf", onApply)
-        end
-    end
-    LogEvent("native probe: GE hook ok=%s%s", tostring(ok), ok and "" or (" err=" .. tostring(err)))
-end
 
 ---------------------------------------------------------------------------------------------------------------------
 -- Break on clash
@@ -1341,6 +1373,9 @@ ApplyBreakSource = function(target, label)
     return ok and after ~= "None" and after ~= before
 end
 
+    -- Export the native hitreact source builder for the switch-GP tornado damage.
+    STABILITY.makeBreakSource = MakeBreakSource
+
 end
 
 local function WatchBreakState(comp, token, label)
@@ -1438,7 +1473,7 @@ local function TryBreakClash(isBlock, reason)
     breakWatchName = name
     breakWatchUntil = now + BREAK_WATCH_SECONDS
     breakStartedAt = now
-    LogKey("break meter full: %s (%d/%d); playing the native Break hitreact", meterName, count,
+    LogEvent("break meter full: %s (%d/%d); playing the native Break hitreact", meterName, count,
         Settings.BreakThreshold)
     local watched = false
     local ownerKey = STABILITY.PlayerKey()
@@ -1561,7 +1596,7 @@ local function FlushDamage(reason)
         pendingAction, pendingDamage, pendingHits = nil, 0, 0
         return
     end
-    LogEvent("action damage: %s on %s = %.0f over %d hit(s) in %.2f s (%s)", pendingAction,
+    LogKey("action damage: %s on %s = %.0f over %d hit(s) in %.2f s (%s)", pendingAction,
         pendingTarget or "?", pendingDamage, pendingHits, pendingLastAt - pendingStartAt, reason)
     pendingAction, pendingTarget, pendingDamage, pendingHits = nil, nil, 0, 0
 end
@@ -1585,7 +1620,7 @@ local function CreditDamage(amount, now)
     pendingDamage = pendingDamage + amount
     pendingHits = pendingHits + 1
     pendingTarget = targetName
-    LogEvent("damage hit: %.0f %s on %s", amount, action, targetName or "?")
+    LogKey("damage hit: %.0f %s on %s", amount, action, targetName or "?")
 end
 
 TickDamage = function(now)
@@ -1665,7 +1700,7 @@ end
 -- 它会让拼刀 1 次刀劲条即满，放龙卷前的普通重攻击可能吃到满档加成。
 ---------------------------------------------------------------------------------------------------------------------
 local TORNADO = {
-    combo = 0, increase = nil, logs = 0, broken = false,
+    combo = 0, increase = nil, logs = 0, broken = false, passiveMissLogs = 0,
     -- Clash streak, double-cast followup state/window and easy-cast tier-up, kept here rather than
     -- as main-chunk locals (200-local cap).
     followup = nil, followupSeconds = 4.0,
@@ -1703,11 +1738,22 @@ function TORNADO.topTier()
             TORNADO.increase = safe(StaticFindObject, path)
         end
     end
-    if not valid(passive) or not valid(TORNADO.increase) then
+    if not valid(TORNADO.increase) then
         TORNADO.broken = true
-        logError("tornado easy: cannot top blade tier (passive or tier-up effect missing)")
+        logError("tornado easy: tier-up effect missing; easy cast disabled")
         return
     end
+    if not valid(passive) then
+        -- The ChiRen passive is inactive while another weapon (e.g. WhiteShadow) is equipped.
+        -- That is transient: retry on the next clash once ChiRen is back, never latch broken here,
+        -- otherwise a single clash during a weapon swap permanently disables easy cast.
+        if TORNADO.passiveMissLogs < 3 then
+            TORNADO.passiveMissLogs = TORNADO.passiveMissLogs + 1
+            LogEvent("tornado easy: ChiRen passive inactive (weapon swapped); will retry next clash")
+        end
+        return
+    end
+    TORNADO.passiveMissLogs = 0
     local before = tier
     for _ = before + 1, 3 do
         local ok = pcall(function() passive:BP_ApplyGameplayEffectToOwner(TORNADO.increase, 1, 1) end)
@@ -1722,97 +1768,168 @@ function TORNADO.topTier()
 end
 
 local CLASH_SLOWMO = {
-    active = false, endsAt = 0, worldSettings = nil, broken = false, logs = 0,
+    active = false, endsAt = 0, worldSettings = nil, broken = false, logs = 0, speed = nil,
+    rushing = false, originalSpeed = nil, worldId = nil,
 }
 
 function CLASH_SLOWMO.getWorldSettings()
     local controller = safe(UEHelpers.GetPlayerController)
-    if not valid(controller) then
-        CLASH_SLOWMO.worldSettings = nil
-        return nil
-    end
+    if not valid(controller) then return nil end
     local world = safe(function() return controller:GetWorld() end)
-    if not valid(world) then
-        CLASH_SLOWMO.worldSettings = nil
-        return nil
-    end
+    if not valid(world) then return nil end
     local level = readField(world, "PersistentLevel")
-    if not valid(level) then
-        CLASH_SLOWMO.worldSettings = nil
-        return nil
-    end
+    if not valid(level) then return nil end
     local ws = readField(level, "WorldSettings")
-    CLASH_SLOWMO.worldSettings = valid(ws) and ws or nil
-    return CLASH_SLOWMO.worldSettings
+    return valid(ws) and ws or nil
+end
+
+function CLASH_SLOWMO.keyOf(ws)
+    if not valid(ws) then return nil end
+    local address = safe(function() return ws:GetAddress() end)
+    local name = FullName(ws)
+    if address == nil or name == "?" then return nil end
+    return tostring(address) .. "|" .. name
 end
 
 function CLASH_SLOWMO.restore()
     CLASH_SLOWMO.active = false
-    local ws = CLASH_SLOWMO.getWorldSettings()
-    if not valid(ws) then return end
-    local cur = readNumber(ws, "DemoPlayTimeDilation")
+    CLASH_SLOWMO.rushing = false
+    -- Restore only the world captured at start, even if the controller now belongs to a new map.
+    local ws = CLASH_SLOWMO.worldSettings
+    local cur = valid(ws) and readNumber(ws, "DemoPlayTimeDilation") or nil
+    local ours = CLASH_SLOWMO.speed or Settings.ClashSlowmoSpeed
     -- Only take back our own value; leave a factor the game or another mod set.
-    if cur ~= nil and math.abs(cur - Settings.ClashSlowmoSpeed) < 0.001 then
-        safe(function() ws.DemoPlayTimeDilation = 1.0 end)
+    if STABILITY.IsFiniteNumber(cur) and math.abs(cur - ours) < 0.001 then
+        local original = CLASH_SLOWMO.originalSpeed
+        if original ~= nil then
+            local ok = pcall(function() ws.DemoPlayTimeDilation = original end)
+            local after = readNumber(ws, "DemoPlayTimeDilation")
+            if not ok or not STABILITY.IsFiniteNumber(after) or math.abs(after - original) > 0.001 then
+                CLASH_SLOWMO.broken = true
+                logError("clash slowmo: world factor restore rejected; optional slowmo disabled")
+            end
+        end
     end
+    CLASH_SLOWMO.originalSpeed = nil
+    CLASH_SLOWMO.worldSettings, CLASH_SLOWMO.worldId = nil, nil
 end
 
 function CLASH_SLOWMO.frameStep()
     if not CLASH_SLOWMO.active then return false end
     local ws = CLASH_SLOWMO.getWorldSettings()
-    if not valid(ws) then
-        CLASH_SLOWMO.active = false
-        return false
-    end
-    if os.clock() >= CLASH_SLOWMO.endsAt then
+    if CLASH_SLOWMO.keyOf(ws) ~= CLASH_SLOWMO.worldId or not valid(CLASH_SLOWMO.worldSettings) then
         CLASH_SLOWMO.restore()
         return false
     end
     local cur = readNumber(ws, "DemoPlayTimeDilation")
-    if cur ~= nil and math.abs(cur - Settings.ClashSlowmoSpeed) > 0.001 then
-        safe(function() ws.DemoPlayTimeDilation = Settings.ClashSlowmoSpeed end)
+    local speed = CLASH_SLOWMO.speed or Settings.ClashSlowmoSpeed
+    -- Another writer takes ownership immediately; never fight it every 16 ms.
+    if not STABILITY.IsFiniteNumber(cur) or math.abs(cur - speed) > 0.001 then
+        CLASH_SLOWMO.restore()
+        return false
+    end
+    if os.clock() >= CLASH_SLOWMO.endsAt then
+        -- Slow-motion is over: optionally hand over to a short "rush" so the hit reads as
+        -- slow-then-fast instead of slow-then-normal, then restore.
+        if not CLASH_SLOWMO.rushing and Settings.SlowmoRushSpeed > 1.0 and Settings.SlowmoRushSeconds > 0 then
+            local ok = pcall(function() ws.DemoPlayTimeDilation = Settings.SlowmoRushSpeed end)
+            local after = readNumber(ws, "DemoPlayTimeDilation")
+            if STABILITY.IsFiniteNumber(after) and math.abs(after - Settings.SlowmoRushSpeed) < 0.001 then
+                CLASH_SLOWMO.speed = Settings.SlowmoRushSpeed
+            end
+            if ok and CLASH_SLOWMO.speed == Settings.SlowmoRushSpeed then
+                CLASH_SLOWMO.rushing = true
+                CLASH_SLOWMO.endsAt = os.clock() + Settings.SlowmoRushSeconds
+                return false
+            end
+        end
+        CLASH_SLOWMO.restore()
+        return false
     end
     return false
 end
 
-function CLASH_SLOWMO.start()
-    if not Settings.ClashSlowmoEnabled or CLASH_SLOWMO.broken then return end
+function CLASH_SLOWMO.start(enabled, speed, seconds)
+    if not enabled or CLASH_SLOWMO.broken then return end
+    speed = speed or Settings.ClashSlowmoSpeed
+    seconds = seconds or Settings.ClashSlowmoSeconds
     local ws = CLASH_SLOWMO.getWorldSettings()
     if not valid(ws) then return end
-    local ok = pcall(function() ws.DemoPlayTimeDilation = Settings.ClashSlowmoSpeed end)
+    local worldId = CLASH_SLOWMO.keyOf(ws)
+    if worldId == nil then return end
+    local cur = readNumber(ws, "DemoPlayTimeDilation")
+    if CLASH_SLOWMO.active and (worldId ~= CLASH_SLOWMO.worldId or not STABILITY.IsFiniteNumber(cur)
+        or math.abs(cur - CLASH_SLOWMO.speed) > 0.001) then
+        CLASH_SLOWMO.restore()
+        if CLASH_SLOWMO.broken then return end
+    end
+    local original = CLASH_SLOWMO.active and CLASH_SLOWMO.originalSpeed or cur
+    if not STABILITY.IsFiniteNumber(original) or original <= 0 then
+        LogEvent("clash slowmo: current world factor unreadable; optional slowmo skipped")
+        return
+    end
+    CLASH_SLOWMO.worldSettings, CLASH_SLOWMO.worldId = ws, worldId
+    CLASH_SLOWMO.originalSpeed = original
+    local previousSpeed = CLASH_SLOWMO.speed
+    local wasActive = CLASH_SLOWMO.active
+    CLASH_SLOWMO.speed = speed
+    local ok = pcall(function() ws.DemoPlayTimeDilation = speed end)
     local after = readNumber(ws, "DemoPlayTimeDilation")
-    if not ok or after == nil or math.abs(after - Settings.ClashSlowmoSpeed) > 0.001 then
+    if not ok or not STABILITY.IsFiniteNumber(after) or math.abs(after - speed) > 0.001 then
+        if wasActive and STABILITY.IsFiniteNumber(after) and math.abs(after - previousSpeed) < 0.001 then
+            CLASH_SLOWMO.speed = previousSpeed
+        end
+        CLASH_SLOWMO.restore()
         CLASH_SLOWMO.broken = true
         logError("clash slowmo: world factor write rejected")
         return
     end
     CLASH_SLOWMO.active = true
-    CLASH_SLOWMO.endsAt = os.clock() + Settings.ClashSlowmoSeconds
+    CLASH_SLOWMO.rushing = false
+    CLASH_SLOWMO.originalSpeed = original
+    CLASH_SLOWMO.speed = speed
+    CLASH_SLOWMO.endsAt = os.clock() + seconds
     if CLASH_SLOWMO.logs < 12 then
         CLASH_SLOWMO.logs = CLASH_SLOWMO.logs + 1
-        LogEvent("clash slowmo: %.2f x %.2f s", Settings.ClashSlowmoSpeed, Settings.ClashSlowmoSeconds)
+        LogEvent("clash slowmo: %.2f x %.2f s", speed, seconds)
     end
 end
 
-local function GrantCharges(reason, isBlock)
+local function GrantCharges(reason, isBlock, isSwitchGp)
     local now = os.clock()
     if isBlock then
         -- A block also consumes a deflect frame, but it is not a clash. It used to grant the full
         -- reward here, which made repeated blocks light the blade and refresh the free attacks.
-        LogKey("clash skipped (block): %s", reason)
+        LogEvent("clash skipped (block): %s", reason)
         TryBreakClash(true, reason)
         return
     end
     if now - lastClash < Settings.CooldownSeconds then return end
     lastClash = now
     charges = Settings.Charges
-    LogKey("clash (%s): %d free heavy attacks", reason, charges)
+    LogEvent("clash (%s): %d free heavy attacks%s", reason, charges, isSwitchGp and " [switch GP]" or "")
     TryFire()
     TryInvulnerable()
-    TORNADO.combo = math.min(TORNADO.combo + 1, Settings.TornadoClashMax)
-    LogKey("tornado combo: %d/%d", TORNADO.combo, Settings.TornadoClashMax)
+    -- A switch-attack GP keeps the free heavies, fire and invulnerability only: it neither builds the
+    -- whirlwind streak nor shares the clash slow-motion toggle.
+    if not isSwitchGp then
+        TORNADO.combo = math.min(TORNADO.combo + 1, Settings.TornadoClashMax)
+        LogEvent("tornado combo: %d/%d", TORNADO.combo, Settings.TornadoClashMax)
+    end
     TryBreakClash(false, reason)
-    CLASH_SLOWMO.start()
+    if isSwitchGp then
+        CLASH_SLOWMO.start(Settings.SwitchSlowmoEnabled, Settings.SwitchSlowmoSpeed, Settings.SwitchSlowmoSeconds)
+        -- Match the execution's timing: the tornado erupts as the sweep follows through.
+        if Settings.SwitchTornadoEnabled then
+            local ownerKey = STABILITY.PlayerKey()
+            STABILITY.After(math.floor(Settings.SwitchTornadoDelaySeconds * 1000), function()
+                if not STABILITY.SamePlayer(ownerKey) then return end
+                SpawnSwitchGpTornado()
+            end)
+        end
+    else
+        CLASH_SLOWMO.start(Settings.ClashSlowmoEnabled, Settings.ClashSlowmoSpeed, Settings.ClashSlowmoSeconds)
+    end
     TORNADO.topTier()
 end
 
@@ -1966,11 +2083,19 @@ local function TryDeflectHook()
         local attackAge = os.clock() - lastAttackAt
         local blockAge = os.clock() - lastBlockImpactAt
         local inDeflect, stanceText = ReadStanceState()
+        -- The switch attack records its activation time; a deflect frame consumed inside the injected
+        -- startup window (plus a small margin for the hit to land) is a switch GP.
+        local switchAge = os.clock() - (STABILITY.switchGpAt or -1e9)
+        local isSwitchGp = Settings.SwitchDeflectInject and
+            switchAge <= Settings.SwitchDeflectFrames / 30 + 0.15
         -- The stance On Impact hook fires for a block/parry but not for a weapon clash, so a fresh
         -- block impact wins over the attack-age guess: a held block followed by an attack press was
-        -- being credited as a clash and interrupted the boss.
+        -- being credited as a clash and interrupted the boss. A switch GP is an attack, so a block
+        -- press just before the switch must not swallow its reward.
         local isBlock
-        if blockAge <= 0.5 then
+        if isSwitchGp then
+            isBlock = false
+        elseif blockAge <= 0.5 then
             isBlock = true
         elseif attackAge <= 0.8 then
             isBlock = false
@@ -1981,10 +2106,10 @@ local function TryDeflectHook()
         end
         if stanceProbeLogs < 40 then
             stanceProbeLogs = stanceProbeLogs + 1
-            LogEvent("clash stance: attackAge=%.2f inDeflect=%s isBlock=%s [%s]",
-                attackAge, tostring(inDeflect), tostring(isBlock), stanceText)
+            LogEvent("clash stance: attackAge=%.2f inDeflect=%s isBlock=%s switch=%s [%s]",
+                attackAge, tostring(inDeflect), tostring(isBlock), tostring(isSwitchGp), stanceText)
         end
-        GrantCharges("deflect frame consumed", isBlock)
+        GrantCharges("deflect frame consumed", isBlock, isSwitchGp)
     end)
     if ok then
         hookedDeflect = true
@@ -2001,54 +2126,53 @@ end
 -- Heavy attack cost
 ---------------------------------------------------------------------------------------------------------------------
 
-local function ShachiSet(value)
-    local pawn = GetPlayerPawn()
-    if not valid(pawn) then
-        return false
-    end
-    local set = readField(pawn, "AttributeSetBase")
-    if not valid(set) then
-        return false
-    end
-    local data = readField(set, "Shachi")
-    if data == nil then
-        return false
-    end
-    return pcall(function() data.CurrentValue = value end)
-end
 
--- The game does not read the ability's Shachi Cost fields nor the HeavyAttack_ShachiCostReduction
--- attribute (both were written successfully and changed nothing), so the cost is taken back after it is
--- charged: watch the bar for about a second and return the part HeavyCostScale keeps. A newer activation
--- cancels the watchers of the previous one, and a rise (regen) just moves the baseline.
-local refundToken = 0
+-- The game ignores the ability's Shachi Cost fields, so a free/reduced heavy is made free by refunding
+-- the cost after it is charged. The refund keys on the game's per-ability "Actual Shachi Consumed"
+-- (snapshotted at the activation entry, since the ability UObject is reused across activations), NOT on
+-- the raw bar dip: raw diff mis-attributes later hits and over-refunds when regen raises the baseline.
+-- Each activation settles once (consumed * (1 - keepScale)), capped at the real Shachi_Max; a newer
+-- activation does not cancel an older refund. SamePlayer guards map swap / death / load.
 
-local function ScheduleShachiRefund(before)
-    local token = refundToken
+local function ScheduleShachiSettlement(consumed, keepScale)
+    if not STABILITY.IsFiniteNumber(consumed) or consumed < 0 then return end
+    if not STABILITY.IsFiniteNumber(keepScale) or keepScale < 0 or keepScale > 1 then return end
+    local refund = consumed * (1 - keepScale)
+    if refund <= 0 then return end
     local ownerKey = STABILITY.PlayerKey()
     if ownerKey == nil then return end
-    local expected = before
-    for _, delay in ipairs({ 80, 160, 260, 400, 600, 850 }) do
-        STABILITY.After(delay, function()
-            if token ~= refundToken or not STABILITY.SamePlayer(ownerKey) then
-                return
-            end
-            local current = PlayerShachi()
-            if current == nil then
-                return
-            end
-            if current < expected - 1 then
-                local spent = expected - current
-                local target = expected - spent * Settings.HeavyCostScale
-                local written = ShachiSet(target)
-                LogEvent("refund +%dms: spent %.0f, kept %.0f, wrote %s ok=%s", delay, spent,
-                    spent * Settings.HeavyCostScale, string.format("%.0f", target), tostring(written))
-                expected = target
-            else
-                expected = current
-            end
-        end)
+    -- Settle synchronously inside the activation callback: the native charge already landed before
+    -- this callback (entry consumed is populated), so adding the refund here keeps the bar dip to
+    -- roughly one frame instead of the previous 80ms. No delayed watcher or settlement retry.
+    if not STABILITY.SamePlayer(ownerKey) then return end
+    local pawn = GetPlayerPawn()
+    if not valid(pawn) then return end
+    local set = safe(function() return pawn.AttributeSetBase end)
+    if not valid(set) then return end
+    local data = readField(set, "Shachi")
+    local base = data ~= nil and safe(function() return data.BaseValue end) or nil
+    local current = readNumber(set, "Shachi")
+    local maxValue = readNumber(set, "Shachi_Max")
+    if not STABILITY.IsFiniteNumber(current) or not STABILITY.IsFiniteNumber(maxValue) or maxValue <= 0 then
+        return
     end
+    -- Full bar: drop the refund entirely, do not bank it for a later hit; never shave a native
+    -- temporary over-cap by writing back down to max.
+    if current >= maxValue then return end
+    -- BaseValue may already contain an uncommitted refund while CurrentValue is still catching up.
+    -- Bound against both layers so repeated activations cannot stack pending Shachi above max.
+    local baseValue = STABILITY.IsFiniteNumber(base) and base or current
+    if baseValue >= maxValue then return end
+    local add = math.min(refund, math.max(0, maxValue - current), math.max(0, maxValue - baseValue))
+    if add <= 0 then return end
+    -- Accepted in combat testing: native aggregation overwrites CurrentValue-only refunds.
+    -- Add once to the persistent BaseValue, bounded against both current and pending values.
+    local newBase = baseValue + add
+    local ok = data ~= nil and pcall(function() data.BaseValue = newBase end)
+    if not ok then logError("shachi settlement: BaseValue write failed") end
+    LogEvent("shachi settle(base): consumed %.1f refund %.1f add %.1f base %.1f->%.1f cur %.1f max %.1f ok=%s",
+        consumed, refund, add, baseValue, newBase, current, maxValue, tostring(ok))
+
 end
 
 ---------------------------------------------------------------------------------------------------------------------
@@ -2236,6 +2360,7 @@ local function ActiveFire()
 end
 
 local function ExtendFire(seconds)
+    if not STABILITY.IsFiniteNumber(seconds) or seconds <= 0 then return false end
     local handle, objects, pawn, abilities = ActiveFire()
     if not handle or not objects or not valid(pawn) or not valid(abilities) then
         LogEvent("tornado burn: active fire handle unavailable")
@@ -2243,7 +2368,7 @@ local function ExtendFire(seconds)
     end
     local lib = objects.gameplay
     local remaining = safe(function() return lib:GetActiveGameplayEffectRemainingDuration(pawn, handle) end)
-    if type(remaining) ~= "number" or remaining <= 0 or remaining >= math.huge then
+    if not STABILITY.IsFiniteNumber(remaining) or remaining <= 0 then
         LogEvent("tornado burn: existing duration unreadable (%s)", tostring(remaining))
         return false
     end
@@ -2252,7 +2377,7 @@ local function ExtendFire(seconds)
         return true
     end
     local total = safe(function() return lib:GetActiveGameplayEffectTotalDuration(handle) end)
-    if type(total) ~= "number" or total < remaining - 0.2 or total >= math.huge then
+    if not STABILITY.IsFiniteNumber(total) or total < remaining - 0.2 then
         LogEvent("tornado burn: total duration unreadable (%s)", tostring(total))
         return false
     end
@@ -2264,12 +2389,12 @@ local function ExtendFire(seconds)
     local requested = total + seconds - remaining
     local writeOk, writeErr = pcall(function() utils:SetActiveGEDuration(abilities, handle, requested) end)
     local now = safe(function() return lib:GetActiveGameplayEffectRemainingDuration(pawn, handle) end)
-    if writeOk and type(now) == "number" and math.abs(now - seconds) > 0.25 then
+    if writeOk and STABILITY.IsFiniteNumber(now) and now > 0 and math.abs(now - seconds) > 0.25 then
         -- The first write can land a frame late; one corrective write closes the gap.
-        pcall(function() utils:SetActiveGEDuration(abilities, handle, requested + seconds - now) end)
+        writeOk, writeErr = pcall(function() utils:SetActiveGEDuration(abilities, handle, requested + seconds - now) end)
         now = safe(function() return lib:GetActiveGameplayEffectRemainingDuration(pawn, handle) end)
     end
-    if not writeOk or type(now) ~= "number" or math.abs(now - seconds) > 0.3 then
+    if not writeOk or not STABILITY.IsFiniteNumber(now) or math.abs(now - seconds) > 0.3 then
         LogEvent("tornado burn: extension failed (remaining=%s%s)", tostring(now),
             writeOk and "" or (" err=" .. tostring(writeErr)))
         return false
@@ -2360,6 +2485,11 @@ OnTornadoCast = function(self, freeAttack)
     ApplyTornadoBurn(Settings.TornadoBurnSeconds)
 end
 
+    -- Export the bullet-damage helpers for the switch-GP tornado damage; they are block-locals here.
+    STABILITY.tornadoBullets = BSUP_BULLETS
+    STABILITY.tornadoBulletRoot = BSUP_BULLET_ROOT
+    STABILITY.eachBulletDamage = EachBulletDamage
+
 end
 
 local costScaleLogged = false
@@ -2367,7 +2497,10 @@ local heavyActivateLogs = 0
 
 local function HeavyActivate(name, self, classPath)
     if not valid(self) then return end
-        refundToken = refundToken + 1
+        -- Snapshot this activation's consumed cost at the earliest callback moment: the charge has
+        -- already landed here, and the ability UObject is reused across activations (a later read could
+        -- belong to the next hit). The number copy decouples the refund from instance reuse.
+        local consumedSnapshot = readNumber(self, "Actual Shachi Consumed")
         lastAttackAt = os.clock()
         NoteAction(name)
         if heavyActivateLogs < 200 then
@@ -2383,6 +2516,14 @@ local function HeavyActivate(name, self, classPath)
                 LogEvent("tornado invuln: %.1f s (C)", Settings.TornadoInvulnSeconds)
                 TryInvulnerable(Settings.TornadoInvulnSeconds)
             end
+            -- C derives from BP_CombatArt_Base, not BP_HeavyAttack_Base: it has no heavy-cost
+            -- fields. Keep its invulnerability, but leave its cost untouched until a separate
+            -- attribution source is verified. Do not consume a free-heavy charge for it.
+            if not STABILITY.combatArtCostNoted then
+                STABILITY.combatArtCostNoted = true
+                LogKey("shachi combat-art C: heavy refund not applicable; native cost unchanged")
+            end
+            return
         end
         local original = origCosts[classPath]
         if not original then
@@ -2396,13 +2537,15 @@ local function HeavyActivate(name, self, classPath)
             logError("heavy cost disabled: reflected Shachi Cost missing on " .. classPath)
             return
         end
-        local before = PlayerShachi()
+        if STABILITY.diagnostics and Settings.ProbeBurnVisual then
+            STABILITY.RunBounded("burn diagnostics", STABILITY.diagnostics.requestBurnSample)
+        end
         local freeAttack = charges > 0
         if charges > 0 then
             self["Shachi Cost"] = 0.0
             if original.min ~= nil then self["Shachi Cost Min"] = 0.0 end
             charges = charges - 1
-            LogKey("free heavy: %s (%d left)", name, charges)
+            LogEvent("free heavy: %s (%d left)", name, charges)
         elseif original.cost ~= nil then
             local scale = Settings.HeavyCostScale
             local cost = original.cost * scale
@@ -2417,20 +2560,13 @@ local function HeavyActivate(name, self, classPath)
                     tostring(original.cost), tostring(cost), tostring(original.min), tostring(min))
             end
         end
-        if Settings.LogEvents and before ~= nil then
-            for _, delay in ipairs({ 400 }) do
-                STABILITY.After(delay, function()
-                    local after = PlayerShachi()
-                    local consumed = valid(self) and readNumber(self, "Actual Shachi Consumed") or nil
-                    if after ~= nil then
-                        LogEvent("heavy cost +%dms: %.0f -> %.0f (delta %.0f) consumed=%s", delay, before,
-                            after, before - after, tostring(consumed))
-                    end
-                end)
-            end
-        end
-        if before ~= nil and not freeAttack and Settings.HeavyCostScale < 1 then
-            ScheduleShachiRefund(before)
+        -- The game ignores the Shachi Cost write, so a free heavy is only really free if the charged
+        -- shachi is refunded too: free keeps nothing (scale 0), reduced keeps HeavyCostScale. Refund the
+        -- snapshotted consumed cost (attributable to this hit), not the raw bar dip.
+        if freeAttack then
+            ScheduleShachiSettlement(consumedSnapshot, 0)
+        elseif Settings.HeavyCostScale < 1 then
+            ScheduleShachiSettlement(consumedSnapshot, Settings.HeavyCostScale)
         end
 end
 
@@ -2769,6 +2905,12 @@ local function KeepBack(context)
     if className ~= SWITCH_BLOCK.ability then return end
     local st = SWITCH_KEEP
     st.backAt = os.clock()
+    -- A fast swap-away-and-back can skip the sampler's frozen edge entirely (it runs on a 1 s tick),
+    -- leaving frozen nil while the tier has already reset to 0. Freeze the pre-swap snapshot here,
+    -- at the moment of swapping back, so the restore still has the real tier to refill.
+    if st.snap and st.snap.tier > 0 and (st.frozen == nil or st.frozen.tier < st.snap.tier) then
+        st.frozen = { tier = st.snap.tier, fire = st.snap.fire, at = st.snap.at }
+    end
     if st.logs < 20 then
         st.logs = st.logs + 1
         local f = st.frozen
@@ -2839,13 +2981,20 @@ local function KeepTick()
         elseif st.snap then
             -- Tier fell to 0 (a whirlwind spent it): sync the snapshot down, otherwise a later swap
             -- freezes the stale high tier and refills the meter from nothing on the way back.
-            st.snap.tier = 0
-            if fire ~= nil then st.snap.fire = fire end
-            st.snap.at = now
+            -- Skip this inside the swap-back window: the 0 there is the swap reset, not a whirlwind
+            -- spend, and zeroing the snapshot would erase the tier the restore is about to refill.
+            if st.backAt == 0 or now - st.backAt > 3.0 then
+                st.snap.tier = 0
+                if fire ~= nil then st.snap.fire = fire end
+                st.snap.at = now
+            end
         end
-    elseif equipped == false and st.wasEquipped == true and st.snap then
+    elseif equipped == false and st.snap and st.snap.tier > 0
+        and (st.frozen == nil or st.frozen.tier < st.snap.tier) then
         -- Copy, not alias: the equipped branch above syncs snap.tier in place, which would
-        -- otherwise zero the frozen value on the way back before it gets restored.
+        -- otherwise zero the frozen value on the way back before it gets restored. Not gated on
+        -- wasEquipped: a fast swap can skip the true->false edge, so freeze whenever ChiRen is away
+        -- and the snapshot still holds a real tier.
         st.frozen = { tier = st.snap.tier, fire = st.snap.fire, at = st.snap.at }
         if st.logs < 20 then
             st.logs = st.logs + 1
@@ -2912,7 +3061,11 @@ local function KeepTick()
             tier, before, snap.fire, snap.tier, snap.fire)
     end
     st.frozen = nil
-    st.snap = nil
+    -- Keep a live snapshot of the just-restored state instead of clearing it. A fast triple-swap
+    -- (ChiRen -> BaiYing -> ChiRen -> BaiYing inside the ~0.5 s hard cd) can swap away again before
+    -- the 1 s sampler rebuilds snap; a nil snap would leave the next swap-back with nothing to
+    -- restore, which is exactly the "buff icon lit then vanished" case.
+    st.snap = { tier = before, fire = KeepFire(asc) or 0, at = now }
     st.backAt = 0
 end
 
@@ -3109,6 +3262,556 @@ function SWITCH_DEFLECT.inject(context)
     end
 end
 
+-- Vanilla whirlwind damage for one layer: PhysicalDamage + ElementDamage of the first loadable
+-- bullet asset. Read once, then cached.
+function ReadSwitchTornadoBaseDamage()
+    -- The bullet value (0.2) is a coefficient, not flat damage: the game multiplies it by the
+    -- player's Attack attribute. Cache the coefficient once; read Attack every call (gear changes it).
+    local coefficient = STABILITY.tornadoCoefficient
+    if coefficient == nil then
+        coefficient = 0
+        local bullets = STABILITY.tornadoBullets
+        local bulletRoot = STABILITY.tornadoBulletRoot
+        local eachBulletDamage = STABILITY.eachBulletDamage
+        if bullets and bulletRoot and eachBulletDamage then
+            for _, name in ipairs(bullets) do
+                local path = bulletRoot .. name .. "." .. name
+                local asset = ResolveObject(path)
+                if valid(asset) then
+                    local sum = 0
+                    local ok = pcall(function()
+                        eachBulletDamage(asset, function(_, value)
+                            local v = value:get()
+                            if type(v) == "number" and v > 0 then sum = sum + v end
+                        end)
+                    end)
+                    if ok and sum > 0 then
+                        coefficient = sum
+                        break
+                    end
+                end
+            end
+        end
+        STABILITY.tornadoCoefficient = coefficient
+    end
+    local attack = 0
+    local pawn = GetPlayerPawn()
+    if valid(pawn) then
+        local set = readField(pawn, "AttributeSetBase")
+        if valid(set) then
+            local v = readNumber(set, "Attack")
+            if STABILITY.IsFiniteNumber(v) and v > 0 then attack = v end
+        end
+    end
+    if coefficient <= 0 or attack <= 0 then
+        LogEvent("switch gp tornado damage: coefficient=%.3f attack=%.1f", coefficient, attack)
+        return 0
+    end
+    return attack * coefficient
+end
+
+-- The game's generic ignite DoT (Inflictions directory, same family as the poison ticks). Applied to
+-- enemies caught in the first tornado tick so the whirlwind leaves a burning state, not just the
+-- direct health write. The player's effect context is used so the burn is credited to the player.
+function ResolveIgniteGe()
+    if valid(STABILITY.igniteGe) then return STABILITY.igniteGe end
+    local path = "/PBZCombatAsset/Prototypes/GameplayEffects/Inflictions/GE_Ignite.GE_Ignite_C"
+    local loaded = safe(LoadAsset, path)
+    if valid(loaded) then STABILITY.igniteGe = loaded; return STABILITY.igniteGe end
+    local found = safe(StaticFindObject, path)
+    if valid(found) then STABILITY.igniteGe = found end
+    return STABILITY.igniteGe
+end
+
+function ResolveIgniteDotGe()
+    if valid(STABILITY.igniteDotGe) then return STABILITY.igniteDotGe end
+    local path = "/PBZCombatAsset/Prototypes/GameplayEffects/Inflictions/GE_Ignite_Dot.GE_Ignite_Dot_C"
+    local loaded = safe(LoadAsset, path)
+    if valid(loaded) then STABILITY.igniteDotGe = loaded; return STABILITY.igniteDotGe end
+    local found = safe(StaticFindObject, path)
+    if valid(found) then STABILITY.igniteDotGe = found end
+    return STABILITY.igniteDotGe
+end
+
+-- Native ignite is two layers: GE_Ignite (the burning state tag) and GE_Ignite_Dot (the damage-over-time
+-- tick). Owned body-fire follows the returned timed state GE handle.
+-- Restore each temporary duration override before visual work; visual failure never blocks the DoT.
+function ApplyIgniteToEnemy(enemy, seconds)
+    local pawn = GetPlayerPawn()
+    local asc = valid(pawn) and readField(pawn, "AbilitySystemComponent") or nil
+    local easc = readField(enemy, "AbilitySystemComponent")
+    if not valid(asc) or not valid(easc) then
+        LogKey("tornado ignite: no ASC")
+        return
+    end
+    local lib = safe(StaticFindObject, "/Script/GameplayAbilities.Default__AbilitySystemBlueprintLibrary")
+    if not valid(lib) then return end
+    local eloc = safe(function() return enemy:K2_GetActorLocation() end)
+    local applied, enriched = 0, 0
+    for layer = 1, 2 do
+        local ge
+        if layer == 1 then ge = ResolveIgniteGe() else ge = ResolveIgniteDotGe() end
+        if valid(ge) then
+            local cdo = FindCDO(ge)
+            if layer == 2 and STABILITY.finishProbe then
+                STABILITY.RunBounded("native finish metadata", STABILITY.finishProbe, enemy, cdo)
+            end
+            local policy = valid(cdo) and readField(cdo, "DurationPolicy") or nil
+            local magnitude = valid(cdo) and readField(cdo, "DurationMagnitude") or nil
+            local restore = magnitude and SetTemporaryDuration(magnitude, seconds, "tornado ignite")
+            -- A timed burn must not silently fall back to the asset's default duration. If this layer has
+            -- a duration (HasDuration=2) but the override could not be written/verified, skip it. Instant
+            -- layers (policy=0, e.g. the DoT) carry no duration and apply normally with restore==nil.
+            if policy == 2 and restore == nil then
+                LogKey("tornado ignite: duration override unavailable; skipping timed layer")
+            else
+                local ok, effectHandle = pcall(function()
+                    local spec = lib:MakeSpecHandleByClass(ge, pawn, pawn, 1.0)
+                    local ctx = lib:GetEffectContext(spec)
+                    if eloc ~= nil then
+                        lib:EffectContextSetOrigin(ctx, eloc)
+                        pcall(function()
+                            lib:EffectContextAddHitResult(ctx, {
+                                Location = eloc, ImpactPoint = eloc,
+                                Normal = { X = 0, Y = 0, Z = 1 }, bBlockingHit = true,
+                            }, false)
+                        end)
+                    end
+                    return easc:BP_ApplyGameplayEffectSpecToTarget(spec, easc)
+                end)
+                if ok then enriched = enriched + 1 end
+                if not ok then
+                    -- Fall back to the plain self-apply so a broken spec path never regresses the DoT.
+                    local ctx0 = safe(function() return asc:MakeEffectContext() end)
+                    if ctx0 then ok, effectHandle = pcall(function() return easc:BP_ApplyGameplayEffectToSelf(ge, 1.0, ctx0) end) end
+                end
+                if restore then restore() end
+                if ok then
+                    applied = applied + 1
+                    if layer == 1 and STABILITY.burnVisual then
+                        STABILITY.RunBounded("enemy burn visual", STABILITY.burnVisual.apply, enemy, effectHandle, seconds)
+                    end
+                end
+            end
+        end
+    end
+    if applied > 0 then
+        LogEvent("tornado ignite: applied %.1fs (%d layers, enriched=%d)", seconds, applied, enriched)
+    else
+        LogKey("tornado ignite: failed (no GE applied)")
+    end
+end
+
+
+-- Moves the tornado component toward the nearest enemy for its 2 s lifetime. The damage scan already
+-- follows the component's world position, so the damage zone travels with it. The component moves
+-- every 50 ms for smoothness, but the enemy scan (a heavy FindAllOf) only refreshes every 250 ms;
+-- between refreshes it keeps the last direction. Once it has tracked an enemy, losing the target
+-- keeps that last tracking direction; only before any enemy is seen does it use the spawn yaw.
+-- Within SwitchTornadoStopDistance of an enemy it holds still (dist = 0) instead of overshooting and
+-- oscillating around the target; it resumes tracking if the enemy moves away.
+function MoveSwitchTornado(comp, yaw, speed)
+    local fx, fy = math.cos(math.rad(yaw)), math.sin(math.rad(yaw))
+    local stepMs, steps = 50, 40
+    local dist = speed * stepMs / 1000
+    local pawn = GetPlayerPawn()
+    local playerName = valid(pawn) and FullName(pawn) or ""
+    local moveMode = 0
+    local function doMove(target)
+        if moveMode == 1 then return pcall(function() comp:K2_SetWorldLocation(target, false, {}, false) end) end
+        if moveMode == 2 then return pcall(function() comp:K2_SetWorldLocation(target, false, nil, false) end) end
+        if moveMode == 3 then return pcall(function() comp:K2_SetWorldLocation(target) end) end
+        local ok, err = pcall(function() comp:K2_SetWorldLocation(target, false, {}, false) end)
+        if ok then moveMode = 1; return ok, err end
+        ok, err = pcall(function() comp:K2_SetWorldLocation(target, false, nil, false) end)
+        if ok then moveMode = 2; return ok, err end
+        ok, err = pcall(function() comp:K2_SetWorldLocation(target) end)
+        if ok then moveMode = 3; return ok, err end
+        return ok, err
+    end
+    local function nearestDir(loc)
+        local comps = safe(FindAllOf, "HitreactComponent")
+        local bestDx, bestDy, bestSq = 0, 0, math.huge
+        for _, c in ipairs(comps or {}) do
+            if valid(c) then
+                local enemy = safe(function() return c:GetOuter() end)
+                if valid(enemy) then
+                    local name = FullName(enemy)
+                    if name ~= playerName and not name:find("Hun", 1, true) then
+                        local eloc = safe(function() return enemy:K2_GetActorLocation() end)
+                        if eloc ~= nil then
+                            local dx, dy = eloc.X - loc.X, eloc.Y - loc.Y
+                            local sq = dx * dx + dy * dy
+                            if sq < bestSq and sq > 1 then
+                                bestSq, bestDx, bestDy = sq, dx, dy
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        if bestSq < math.huge then
+            local d = math.sqrt(bestSq)
+            return bestDx / d, bestDy / d, d
+        end
+        return nil
+    end
+    local function step(i)
+        if i > steps or not valid(comp) then return end
+        local loc = safe(function() return comp:K2_GetComponentLocation() end)
+        if loc ~= nil then
+            if i == 1 or (i % 5) == 0 then
+                local nx, ny, nd = nearestDir(loc)
+                if nx ~= nil then
+                    fx, fy = nx, ny
+                    local stop = Settings.SwitchTornadoStopDistance
+                    dist = (stop > 0 and nd < stop) and 0 or (speed * stepMs / 1000)
+                else
+                    dist = speed * stepMs / 1000
+                end
+            end
+            local okM, errM = true, nil
+            if dist > 0 then
+                local target = { X = loc.X + fx * dist, Y = loc.Y + fy * dist, Z = loc.Z }
+                okM, errM = doMove(target)
+            end
+            if i == 1 then
+                if dist == 0 then
+                    LogEvent("switch gp firetornado: hold (enemy within %.0f cm)", Settings.SwitchTornadoStopDistance)
+                elseif okM then
+                    LogEvent("switch gp firetornado: move ok mode=%d speed=%.0f cm/s homing", moveMode, speed)
+                else
+                    LogKey("switch gp firetornado: move FAILED err=%s", tostring(errM))
+                    return
+                end
+            end
+        end
+        STABILITY.After(stepMs, function() step(i + 1) end)
+    end
+    step(1)
+end
+
+
+-- A raw attribute write never fires the boss bar's attribute-change delegate, so HP drops while the
+-- bar freezes. Drive the bar the way the native HUD does: ForSeq_UpdateHealth(ratio) on the
+-- WB_BossHPBar_C bound to this enemy, then read hpbar.CurPercent back to confirm it took. The bar
+-- list is a heavy FindAllOf, so cache it and refresh at most once a second across the tornado ticks.
+function RefreshEnemyBossBar(enemy, curHP)
+    if not valid(enemy) or not STABILITY.IsFiniteNumber(curHP) then return end
+    local now = os.clock()
+    if STABILITY.bossBarCache == nil or now - (STABILITY.bossBarAt or 0) > 1.0 then
+        STABILITY.bossBarAt = now
+        STABILITY.bossBarCache = safe(FindAllOf, "WB_BossHPBar_C") or {}
+    end
+    local eset = readField(enemy, "AttributeSetBase")
+    if not valid(eset) then return end
+    local maxHP = readNumber(eset, "Health_Max")
+    if not STABILITY.IsFiniteNumber(maxHP) or maxHP <= 0 then return end
+    local ratio = math.max(0, math.min(1, curHP / maxHP))
+    local ekey = safe(function() return enemy:GetAddress() end)
+    if ekey == nil then return end
+    for _, bar in ipairs(STABILITY.bossBarCache) do
+        if valid(bar) then
+            local ch = readField(bar, "Character")
+            local ckey = valid(ch) and safe(function() return ch:GetAddress() end) or nil
+            if ckey == ekey then
+                local ok, err = pcall(function() bar:ForSeq_UpdateHealth(ratio) end)
+                local hpbar = readField(bar, "hpbar")
+                local actual = valid(hpbar) and readNumber(hpbar, "CurPercent") or nil
+                local verified = ok and STABILITY.IsFiniteNumber(actual)
+                    and math.abs(actual - ratio) < 0.002
+                if not ok then logError("bossbar refresh failed: " .. tostring(err)) end
+                if (STABILITY.bossBarLogs or 0) < 12 then
+                    STABILITY.bossBarLogs = (STABILITY.bossBarLogs or 0) + 1
+                    LogEvent("bossbar refresh: hp=%.0f/%.0f ratio=%.3f actual=%s ok=%s verified=%s%s",
+                        curHP, maxHP, ratio,
+                        STABILITY.IsFiniteNumber(actual) and string.format("%.3f", actual) or "nil",
+                        tostring(ok), tostring(verified), ok and "" or (" err=" .. tostring(err)))
+                end
+                return
+            end
+        end
+    end
+end
+
+-- One tornado damage tick: rescans the area (player and enemies move between ticks), lowers health
+-- on every target in range and plays the native hit reaction. Health is written on both BaseValue
+-- and CurrentValue: the attribute aggregator recomputes CurrentValue from BaseValue.
+function SwitchTornadoDamageTick(damage, tickIndex, isLast, tornadoComp)
+    -- Optional test multiplier; the key is absent from the release config, so this defaults to 1.
+    damage = damage * (Settings.TestDamageScale or 1)
+    local pawn = GetPlayerPawn()
+    if not valid(pawn) then return end
+    -- World locations, not RootComponent.RelativeLocation (which is parent-relative and can be 0).
+    local origin = safe(function() return pawn:K2_GetActorLocation() end)
+    if origin == nil then return end
+    -- Center the scan on the tornado component's world position when readable, so the damage zone
+    -- sits where the whirlwind is instead of on the player (who keeps moving after the GP).
+    local center = origin
+    if tornadoComp ~= nil then
+        local cloc = safe(function() return tornadoComp:K2_GetComponentLocation() end)
+        if cloc ~= nil and (cloc.X ~= 0 or cloc.Y ~= 0 or cloc.Z ~= 0) then center = cloc end
+    end
+    local rotation = safe(function() return pawn:K2_GetActorRotation() end)
+    local yaw = rotation and rotation.Yaw or 0
+    local cosLimit = math.cos(math.rad(Settings.SwitchTornadoAngle * 0.5))
+    local radiusSq = Settings.SwitchTornadoRadius * Settings.SwitchTornadoRadius
+    local forwardX, forwardY = math.cos(math.rad(yaw)), math.sin(math.rad(yaw))
+    local playerName = FullName(pawn)
+    local hits, applied = 0, 0
+    -- Only the first tick plays the native hit reaction (animation + hit sound); the native
+    -- whirlwind damages in reps without interrupting the enemy on every rep.
+    local reactSrc
+    if tickIndex == 1 and STABILITY.makeBreakSource then
+        reactSrc = STABILITY.makeBreakSource(pawn)
+    end
+    local comps = safe(FindAllOf, "HitreactComponent")
+    for _, comp in ipairs(comps or {}) do
+        if valid(comp) then
+            local enemy = safe(function() return comp:GetOuter() end)
+            if valid(enemy) then
+                local name = FullName(enemy)
+                if name ~= playerName and not name:find("Hun", 1, true) then
+                    local eloc = safe(function() return enemy:K2_GetActorLocation() end)
+                    if eloc ~= nil then
+                        local dx, dy = eloc.X - center.X, eloc.Y - center.Y
+                        local distSq = dx * dx + dy * dy
+                        if distSq <= radiusSq then
+                            local cos = 1.0
+                            local dist = math.sqrt(distSq)
+                            if dist > 1 then cos = (dx * forwardX + dy * forwardY) / dist end
+                            if cos >= cosLimit then
+                                hits = hits + 1
+                                if STABILITY.diagnostics then
+                                    STABILITY.RunBounded("target diagnostics", STABILITY.diagnostics.inspectTarget, enemy)
+                                end
+                                pcall(function()
+                                    local eset = readField(enemy, "AttributeSetBase")
+                                    if not valid(eset) then return end
+                                    local hdata = readField(eset, "Health")
+                                    if hdata == nil then return end
+                                    local hp = readNumber(eset, "Health")
+                                    if not STABILITY.IsFiniteNumber(hp) or hp <= 0 then return end
+                                    if tickIndex == 1 then
+                                        LogEvent("switch gp tornado target: %s hp=%.0f dist=%.0f", name, hp, dist)
+                                    end
+                                    local baseVal = safe(function() return hdata.BaseValue end)
+                                    if not STABILITY.IsFiniteNumber(baseVal) then baseVal = hp end
+                                    -- Cap at 1 HP, never 0: writing 0 (or force-killing) skips the boss's
+                                    -- native death/phase event and leaves it stuck at 0 HP, unkillable even
+                                    -- by normal attacks. The game's own damage pipeline finishes the kill.
+                                    pcall(function() hdata.BaseValue = math.max(1, baseVal - damage) end)
+                                    pcall(function() hdata.CurrentValue = math.max(1, hp - damage) end)
+                                    local after = readNumber(eset, "Health")
+                                    if STABILITY.IsFiniteNumber(after) and after < hp - 1 then
+                                        applied = applied + 1
+                                        RefreshEnemyBossBar(enemy, after)
+                                    end
+                                    -- Native finishing blow: at the 1 HP cap the DoT cannot be relied on to
+                                    -- kill (it ticks 0 sometimes). Route a lethal hit through the boss's own
+                                    -- damage interface so the native death/phase event fires, instead of
+                                    -- writing 0 directly (which stuck the boss). Once per enemy.
+                                    if Settings.TestNativeFinish and STABILITY.IsFiniteNumber(after) and after <= 1 then
+                                        local ekey = safe(function() return enemy:GetAddress() end)
+                                        STABILITY.nativeFinished = STABILITY.nativeFinished or {}
+                                        if ekey and not STABILITY.nativeFinished[ekey] then
+                                            STABILITY.nativeFinished[ekey] = true
+                                            local fok, ferr = pcall(function()
+                                                enemy:BPI_TakeDamage({
+                                                    HPDamageValue = after,
+                                                    DamagePhysicValue = { DamagePoint = eloc, DamageDirection = { X = 0, Y = 0, Z = 1 }, Impact = 0 },
+                                                    InstigatorCharacter = pawn,
+                                                    HitComponent = nil,
+                                                })
+                                            end)
+                                            local post = readNumber(eset, "Health")
+                                            LogKey("tornado finish: BPI_TakeDamage hp=%.0f ok=%s post=%s%s",
+                                                after, tostring(fok), tostring(post), fok and "" or (" err=" .. tostring(ferr)))
+                                        end
+                                    end
+                                end)
+                                if reactSrc ~= nil then
+                                    pcall(function() comp:PlayHitreactToAvatar(reactSrc) end)
+                                end
+                                if Settings.SwitchTornadoBurnSeconds > 0 then
+                                    local every = math.max(1, math.floor(Settings.SwitchTornadoBurnEvery))
+                                    if tickIndex == 1 or isLast or (tickIndex % every) == 0 then
+                                        ApplyIgniteToEnemy(enemy, Settings.SwitchTornadoBurnSeconds)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    LogEvent("switch gp tornado tick %d: hits=%d applied=%d testScale=x%s center=(%.0f,%.0f)", tickIndex, hits, applied, tostring(Settings.TestDamageScale or 1), center.X, center.Y)
+
+end
+
+-- Splits the vanilla one-layer whirlwind damage into several ticks over the tornado's lifetime, so
+-- the hit rhythm matches the native BSup whirlwind (8 reps in ~0.88 s) instead of one lump sum.
+function ApplySwitchGpTornadoDamage(tornadoComp)
+    if Settings.SwitchTornadoDamageScale <= 0 then return end
+    -- Base = measured vanilla one-layer damage (log: BSup x4 = 4399 -> about 1100 per layer at
+    -- Attack 100). It grows linearly with the player's current Attack so weapon/level upgrades scale
+    -- it like the native whirlwind. Base 0 falls back to Attack x bullet coefficient.
+    local base = Settings.SwitchTornadoDamageBase
+    local attack = 0
+    local pawn = GetPlayerPawn()
+    if valid(pawn) then
+        local set = readField(pawn, "AttributeSetBase")
+        if valid(set) then
+            local v = readNumber(set, "Attack")
+            if STABILITY.IsFiniteNumber(v) and v > 0 then attack = v end
+        end
+    end
+    if base <= 0 then
+        base = ReadSwitchTornadoBaseDamage()
+    elseif attack > 0 and Settings.SwitchTornadoCalibratedAttack > 0 then
+        base = base * attack / Settings.SwitchTornadoCalibratedAttack
+    end
+    if base <= 0 then
+        LogKey("switch gp tornado damage: base unavailable")
+        return
+    end
+    local total = base * Settings.SwitchTornadoDamageScale
+    local ticks = math.max(1, math.floor(Settings.SwitchTornadoTicks))
+    local perTick = total / ticks
+    local intervalMs = math.max(16, math.floor(Settings.SwitchTornadoTickSeconds * 1000 / ticks))
+    LogKey("switch gp tornado damage: base=%.1f attack=%.0f total=%.0f ticks=%d interval=%dms",
+        base, attack, total, ticks, intervalMs)
+    for i = 1, ticks do
+        local idx, last = i, (i == ticks)
+        if i == 1 then
+            SwitchTornadoDamageTick(perTick, idx, last, tornadoComp)
+        else
+            STABILITY.After((i - 1) * intervalMs, function()
+                SwitchTornadoDamageTick(perTick, idx, last, tornadoComp)
+            end)
+        end
+    end
+end
+
+
+-- Wwise playback: PBZ battle audio goes through AkAudioEvent, not SoundWave. PostEvent has several
+-- overloads; try the event-object one first, then the event-name one, and log whichever binds.
+function PlayWwiseEvent(path, actor)
+    local ev = safe(StaticFindObject, path)
+    if not valid(ev) then
+        safe(LoadAsset, path)
+        ev = safe(StaticFindObject, path)
+    end
+    if not valid(ev) then
+        LogKey("wwise play: event unavailable")
+        return
+    end
+    local st = safe(StaticFindObject, "/Script/AkAudio.Default__AkGameplayStatics")
+    if not valid(st) then
+        LogKey("wwise play: AkGameplayStatics unavailable")
+        return
+    end
+    local ok5, err5 = pcall(function() st:PostEvent(ev, actor, 0, nil, 0) end)
+    if ok5 then
+        LogEvent("wwise play: posted (5-arg)")
+        return
+    end
+    LogKey("wwise play: 5-arg failed err=%s", tostring(err5))
+end
+
+-- The execution finisher's fire tornado (HeiShang long-blade VFX). Spawned the moment a switch GP
+-- succeeds so the switch parry ends with the same fire whirlwind the execution uses.
+local COUNTER_TORNADO_PATH =
+    "/PBZVFXPack/VFX/BattleFX/Weapon/HeiShang/NS_LongBlade_Firetornado_401.NS_LongBlade_Firetornado_401"
+function SpawnSwitchGpTornado()
+    local pawn = GetPlayerPawn()
+    if not valid(pawn) then return end
+    local path = COUNTER_TORNADO_PATH
+    local system = STABILITY.counterTornado
+    if not valid(system) then
+        system = safe(StaticFindObject, path)
+        if not valid(system) then
+            safe(LoadAsset, path)
+            system = safe(StaticFindObject, path)
+        end
+        STABILITY.counterTornado = system
+    end
+    if not valid(system) then
+        LogKey("switch gp firetornado: system unavailable")
+        return
+    end
+    local lib = safe(StaticFindObject, "/Script/Niagara.Default__NiagaraFunctionLibrary")
+    if not valid(lib) then
+        LogKey("switch gp firetornado: NiagaraFunctionLibrary unavailable")
+        return
+    end
+    local location = safe(function() return pawn:K2_GetActorLocation() end)
+    local rotation = safe(function() return pawn:K2_GetActorRotation() end)
+    if location == nil then
+        LogKey("switch gp firetornado: no pawn location")
+        return
+    end
+    -- The execution tornado starts at ground level in front of the player, not at blade height / on
+    -- the body. Yaw 0 faces +X, so forward = (cos, sin).
+    local yaw = rotation and rotation.Yaw or 0
+    local distance = Settings.SwitchTornadoDistance
+    local ground = {
+        X = location.X + math.cos(math.rad(yaw)) * distance,
+        Y = location.Y + math.sin(math.rad(yaw)) * distance,
+        Z = location.Z - Settings.SwitchTornadoDrop,
+    }
+    -- Full 9-argument signature: world context, system, location, rotation, scale, auto destroy,
+    -- auto activate, pooling method (0 = None), pre-cull check.
+    local ok, comp = pcall(function()
+        return lib:SpawnSystemAtLocation(pawn, system, ground, rotation or { X = 0, Y = 0, Z = 0 },
+            { X = 1, Y = 1, Z = 1 }, true, true, 0, true)
+    end)
+    if ok and comp ~= nil then
+        LogKey("switch gp firetornado: spawned")
+        PlayWwiseEvent("/Game/Wwise/Events/SFX/Combat/Special/Hero_Special/Hun/Common/Wave_Stab_BaDao/ChiRen/ChiRen/SFX_Combat_Hun_ChiRen_Wave_Fire.SFX_Combat_Hun_ChiRen_Wave_Fire", pawn)
+        local dmgOk, dmgErr = xpcall(function() ApplySwitchGpTornadoDamage(comp) end, debug.traceback)
+        if not dmgOk then logError("tornado damage: " .. tostring(dmgErr)) end
+        if Settings.SwitchTornadoSpeed > 0 then
+            MoveSwitchTornado(comp, yaw, Settings.SwitchTornadoSpeed)
+        end
+        -- Probe the component's user-exposed parameters: if the system has Speed/Target style
+        -- variables, movement can be tuned from here. pcall here so a missing binding stays quiet.
+        if Settings.ProbeSwitchAttack then
+            local okVars, vars = pcall(function() return comp:GetAllUserVariables() end)
+            if okVars and vars then
+                LogKey("switch gp firetornado: user vars=%d", #vars)
+                for i = 1, math.min(#vars, 20) do
+                    local entry = vars[i]
+                    local label = tostring(entry)
+                    local okName, nameField = pcall(function() return entry.Name end)
+                    if okName and nameField ~= nil then
+                        local okStr, text = pcall(function() return nameField:ToString() end)
+                        if okStr and type(text) == "string" then label = text end
+                    end
+                    LogKey("switch gp firetornado: var %d %s", i, label)
+                end
+            else
+                LogKey("switch gp firetornado: user vars not exposed")
+            end
+        end
+        -- Looping system: auto-destroy never fires. Deactivate stops emission; the component itself
+        -- needs the owner's blueprint destroy route (DestroyComponent is not exposed on this build).
+        STABILITY.After(2000, function()
+            -- No valid(comp) gate here: IsValid is unreliable on this component type, and skipping
+            -- the whole cleanup leaves a looping tornado behind. Every step is individually guarded.
+            pcall(function() comp:Deactivate() end)
+            pcall(function() comp:SetActive(false) end)
+            local okOwner, owner = pcall(function() return comp:GetOwner() end)
+            if okOwner and owner ~= nil then
+                pcall(function() owner:K2_DestroyComponent(comp) end)
+            end
+        end)
+    else
+        LogKey("switch gp firetornado: spawn failed (%s)", tostring(ok and "nil component" or comp))
+    end
+end
+
 local function TuneClashWindow(context)
     if Settings.ProbeSwitchAttack and ProbeSwitchActivate then
         ProbeSwitchActivate(context)
@@ -3124,7 +3827,10 @@ local function TuneClashWindow(context)
     if valid(switchAbility) then
         local switchClass = safe(function() return switchAbility:GetClass():GetFName():ToString() end)
         if switchClass == SWITCH_BLOCK.ability then
-            lastAttackAt = os.clock()
+            local now = os.clock()
+            lastAttackAt = now
+            -- Lets the deflect callback recognise a switch GP and give it its own rewards.
+            STABILITY.switchGpAt = now
         end
     end
     if Settings.ClashWindowFrames <= 0 then return end
@@ -3216,9 +3922,10 @@ local probeDone = false
 local probeAttempts = 0
 local probeLogs = 0
 
+
 local function ProbeLog(fmt, ...)
-    if probeLogs >= 500 then
-        if probeLogs == 500 then
+    if probeLogs >= 1400 then
+        if probeLogs == 1400 then
             probeLogs = probeLogs + 1
             log("probe: log limit reached")
         end
@@ -3227,6 +3934,10 @@ local function ProbeLog(fmt, ...)
     probeLogs = probeLogs + 1
     log(fmt, ...)
 end
+
+-- One-shot AssetRegistry sweep: list cached package paths whose name hints at the execution fire
+-- effect, so the mod can spawn/reuse the game's own VFX instead of building one.
+
 
 local function ClassPath(object)
     local full = safe(function() return object:GetFullName() end)
@@ -3315,6 +4026,17 @@ local function DumpAbilityTimeline(ability, label, verbose)
             if verbose and rows <= 60 then
                 ProbeLog("%s row%d start=%s dur=%s action=%s", label, rows,
                     tostring(startTime), tostring(duration), actionName)
+                -- Sound actions: dump the cue asset so the tornado can reuse the game's own audio.
+                if actionName:find("PlaySound", 1, true) then
+                    local rawCue = readField(action, "Sound") or readField(action, "SoundCue")
+                        or readField(action, "Cue") or readField(action, "Sound Asset")
+                    if rawCue ~= nil then
+                        local okGet, unwrapped = pcall(function() return rawCue:get() end)
+                        if okGet and unwrapped ~= nil then rawCue = unwrapped end
+                        if valid(rawCue) then rawCue = FullName(rawCue) end
+                    end
+                    ProbeLog("%s row%d sound=%s", label, rows, tostring(rawCue))
+                end
             end
             if actionName:find(CLASH_DEFLECT_CLASS, 1, true) then
                 deflects = deflects + 1
@@ -3387,15 +4109,20 @@ ProbeSwitchActivate = function(context)
     -- the same ability as the manual button. GA_Hun_ChiRen_C_C is the likely manual entry, so every
     -- ChiRen ability gets dumped; non-switch ones only log their deflect boxes to stay in budget.
     local isChiRen = className:find("ChiRen", 1, true)
+    -- Execution candidates: one finisher swings out a large fire tornado, so dump these timelines too
+    -- and look for the fire VFX row.
+    local isExec = className:find("Execut", 1, true) or className:find("Finish", 1, true)
+        or className:find("ChuJue", 1, true) or className:find("Kill", 1, true)
+        or className:find("Death", 1, true)
     if not switchSeen[className] then
         switchSeen[className] = true
         if switchActivateLogs < 40 then
             switchActivateLogs = switchActivateLogs + 1
             ProbeLog("switch probe: activate %s", className)
         end
-        if (isSwitch or isChiRen) and not switchDumped[className] then
+        if (isSwitch or isChiRen or isExec) and not switchDumped[className] then
             switchDumped[className] = true
-            DumpAbilityTimeline(ability, "switch probe " .. className, isSwitch)
+            DumpAbilityTimeline(ability, "switch probe " .. className, isSwitch or isExec)
         end
     end
     -- Every activation, not just the first: this shows whether a weapon swap fires SWT_C, C_C or
@@ -3675,7 +4402,9 @@ local function Tick()
     TryDeflectHook()
     TryHitreactHook()
     TryBlockHook()
-    if Settings.ProbeSwitchAttack or (Settings.BreakOnClash and Settings.LogEvents) then
+    -- Register the short break-montage observer whenever the feature is enabled; do not couple
+    -- gameplay observation to verbose diagnostic logging.
+    if Settings.ProbeSwitchAttack or Settings.BreakOnClash then
         TryMontageHook()
     end
     for _, name in ipairs(HEAVY_CLASSES) do
@@ -3688,7 +4417,6 @@ local function Tick()
     TryClashWindowHook()
     if Settings.ProbeSwitchAttack then
         TryNativeInvulnProbe()
-        TryNativeGeHook()
         HookChiRenGas()
         ProbeSwitchInstances()
         ProbeOnce()
@@ -3720,8 +4448,11 @@ function STABILITY.ObservePlayer()
     -- confirmed new pawn clears it; while nil, pause this tick and keep the previous state.
     if key == nil then return false end
     if key ~= STABILITY.currentPlayerKey then
+        if STABILITY.currentPlayerKey ~= nil and CLASH_SLOWMO.active then CLASH_SLOWMO.restore() end
+        if STABILITY.burnVisual then
+            STABILITY.RunBounded("enemy burn visual reset", STABILITY.burnVisual.reset)
+        end
         STABILITY.currentPlayerKey = key
-        refundToken = refundToken + 1
         invulnToken = invulnToken + 1
         invulnGuardToken = invulnGuardToken + 1
         breakToken = breakToken + 1
@@ -3738,31 +4469,100 @@ function STABILITY.ObservePlayer()
 end
 
 local function TickSafe()
-    if STABILITY.ObservePlayer() then STABILITY.RunBounded("discovery", Tick) end
+    if STABILITY.ObservePlayer() then
+        STABILITY.RunBounded("discovery", Tick)
+        if STABILITY.diagnostics then STABILITY.RunBounded("diagnostics", STABILITY.diagnostics.tick) end
+    end
     return false
 end
 
 local function SampleSafe()
-    if not STABILITY.ObservePlayer() then return false end
-    if Settings.FireEnabled then STABILITY.RunBounded("burning", CheckBurning) end
-    if Settings.SwitchKeepStacks then STABILITY.RunBounded("switch keep", KeepTick) end
-    if Settings.LogDamage then STABILITY.RunBounded("damage", TickDamage, os.clock()) end
     -- Safety net: if the slow-motion frame loop ever stops restoring, take the factor back here.
+    -- This uses the captured world, so a missing pawn during travel must not bypass cleanup.
     if CLASH_SLOWMO.active and os.clock() > CLASH_SLOWMO.endsAt + 0.3 then
         local slowOk, slowErr = pcall(CLASH_SLOWMO.restore)
         if not slowOk then logError(slowErr) end
     end
+    if not STABILITY.ObservePlayer() then
+        -- Travel/loading: reset the baseline so the gap is not reported as a hitch.
+        STABILITY.lastSampleAt = os.clock()
+        return false
+    end
+    if Settings.LogEvents then
+        local now = os.clock()
+        if STABILITY.lastSampleAt and now - STABILITY.lastSampleAt > 0.8 then
+            LogEvent("hitch: sampler late %.0f ms", (now - STABILITY.lastSampleAt) * 1000)
+        end
+        STABILITY.lastSampleAt = now
+    end
+    if Settings.FireEnabled then STABILITY.RunBounded("burning", CheckBurning) end
+    if Settings.SwitchKeepStacks then STABILITY.RunBounded("switch keep", KeepTick) end
+    if Settings.LogDamage then STABILITY.RunBounded("damage", TickDamage, os.clock()) end
     return false
 end
 
 log(VERSION .. " loaded")
 
+-- Gameplay body-fire is independent of development probes.
+if Settings.EnemyBurnVisual then
+    local ok, factory = pcall(require, "chiren_burn_visual")
+    if ok and type(factory) == "function" then
+        local initialized, module = pcall(factory, {
+            valid=valid, readField=readField, readNumber=readNumber, finite=STABILITY.IsFiniteNumber,
+            playerKey=STABILITY.PlayerKey, samePlayer=STABILITY.SamePlayer, after=STABILITY.After,
+            trace=LogEvent, error=logError, fullName=FullName,
+        })
+        if initialized and type(module) == "table" then STABILITY.burnVisual = module
+        else logError("burn visual unavailable: " .. tostring(module)) end
+    else logError("burn visual module missing; damage unchanged") end
+end
+
+-- One bounded metadata pass; never enabled by release defaults.
+if Settings.ProbeNativeFinish then
+    local ok, factory = pcall(require, "chiren_finish_probe")
+    if ok and type(factory) == "function" then
+        local initialized, probe = pcall(factory, {valid=valid, readField=readField, fullName=FullName, log=log})
+        if initialized and type(probe) == "function" then STABILITY.finishProbe = probe
+        else logError("finish metadata probe unavailable") end
+    else logError("finish metadata module missing") end
+end
+
+-- Optional research lives in a separate file. Release defaults never load or schedule it.
+if Settings.ProbeBurnVisual or Settings.ProbeCombatApi or Settings.TestBurnAttach then
+    local okDiag, factory = pcall(require, "chiren_diagnostics")
+    if okDiag and type(factory) == "function" then
+        local okInit, diagnostics = pcall(factory, {
+            settings = Settings, log = log, valid = valid, readField = readField,
+            player = GetPlayerPawn, playerKey = STABILITY.PlayerKey, samePlayer = STABILITY.SamePlayer,
+            after = STABILITY.After, fullName = FullName,
+        })
+        if okInit and type(diagnostics) == "table" then
+            STABILITY.diagnostics = diagnostics
+        else
+            logError("diagnostics disabled: " .. tostring(diagnostics))
+        end
+    else
+        logError("diagnostics disabled: module unavailable")
+    end
+end
+
 function STABILITY.StartLoop(delay, callback)
     local queued = false
+    local failures, retryAt = 0, 0
+    local function noteFailure(kind, err)
+        failures = failures + 1
+        retryAt = os.clock() + math.min(2 ^ math.min(failures, 6), 60)
+        logError(kind .. ": " .. tostring(err))
+    end
     local function run()
-        local ok, err = pcall(callback)
         queued = false
-        if not ok then logError("timer callback: " .. tostring(err)) end
+        if os.clock() < retryAt then return false end
+        local ok, err = pcall(callback)
+        if ok then
+            failures, retryAt = 0, 0
+        else
+            noteFailure("timer callback", err)
+        end
         return false
     end
     local ok, err
@@ -3771,12 +4571,12 @@ function STABILITY.StartLoop(delay, callback)
     else
         ok, err = pcall(LoopAsync, delay, function()
             -- A slow/loading game thread gets at most one pending job per loop.
-            if queued then return false end
+            if queued or os.clock() < retryAt then return false end
             queued = true
             local sent, sendErr = pcall(ExecuteInGameThread, run)
             if not sent then
                 queued = false
-                logError("game-thread dispatch: " .. tostring(sendErr))
+                noteFailure("game-thread dispatch", sendErr)
             end
             return false
         end)
@@ -3788,6 +4588,6 @@ end
 -- sweep halves the periodic FindAllOf cost on fresh saves without delaying any registered hook.
 STABILITY.StartLoop(3000, TickSafe)
 STABILITY.StartLoop(300, SampleSafe)
-if Settings.ClashSlowmoEnabled then
+if Settings.ClashSlowmoEnabled or Settings.SwitchSlowmoEnabled then
     STABILITY.StartLoop(16, CLASH_SLOWMO.frameStep)
 end

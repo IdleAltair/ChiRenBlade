@@ -33,7 +33,7 @@ do
 end
 
 local MOD = "ChiRenBlade"
-local VERSION = "1.0"
+local VERSION = "1.1"
 
 local DEFAULTS = {
     Charges = 6,
@@ -61,6 +61,7 @@ local DEFAULTS = {
     TornadoDamageSeconds = 4.0,
     TornadoBurnSeconds = 15,
     TornadoEasyCast = false,
+    HighlightTornadoReady = true,
     BreakOnClash = true,
     BreakThreshold = 3,
     BreakHoldSeconds = 1.2,
@@ -86,18 +87,10 @@ local DEFAULTS = {
     SwitchTornadoSpeed = 600,
     SwitchTornadoBurnSeconds = 5,
     SwitchTornadoBurnEvery = 4,
-    TestDamageScale = 1,
-    TestNativeFinish = false,
     SwitchTornadoStopDistance = 100,
     LogImportant = true,
     LogEvents = false,
-    LogDamage = false,
-    ProbeSwitchAttack = false,
-    ProbeBurnVisual = false,
-    ProbeCombatApi = false,
-    TestBurnAttach = false,
     EnemyBurnVisual = true,
-    ProbeNativeFinish = false,
 }
 
 -- The game's global combat config asset holds the block-parry perfect window.
@@ -129,15 +122,6 @@ local HEAVY_CLASSES = {
     "GA_Hun_ChiRen_BD_C",
     "GA_Hun_ChiRen_BSup_C",
     "GA_Hun_ChiRen_C_C",
-}
-
--- Light chains also put the player into an attack, which is the real signal that a deflect frame
--- came from a clash rather than a held block.
-local ATTACK_CLASSES = {
-    "GA_Hun_ChiRen_A_C", "GA_Hun_ChiRen_AA_C", "GA_Hun_ChiRen_AAA_C",
-    "GA_Hun_ChiRen_AAAA_C", "GA_Hun_ChiRen_AAAAB_C", "GA_Hun_ChiRen_AAAABB_C",
-    "GA_Hun_ChiRen_AAAB_C", "GA_Hun_ChiRen_AAABB_C", "GA_Hun_ChiRen_AAB_C",
-    "GA_Hun_ChiRen_AABB_C", "GA_Hun_ChiRen_AB_C", "GA_Hun_ChiRen_ABB_C",
 }
 
 local errors = 0
@@ -480,14 +464,6 @@ local function IsPlayerActor(actor)
     return FullName(actor):find("BP_Renewal_Hun", 1, true) ~= nil
 end
 
-local function PlayerShachi()
-    local pawn = GetPlayerPawn()
-    if not valid(pawn) then return nil end
-    local set = safe(function() return pawn.AttributeSetBase end)
-    if not valid(set) then return nil end
-    return readNumber(set, "Shachi")
-end
-
 local function CheckBurning()
     if not Settings.FireEnabled or (not Settings.LogEvents and not fireAppliedAt) then return end
     local pawn = GetPlayerPawn()
@@ -520,7 +496,7 @@ local function CheckBurning()
                 fireAskedSeconds = nil
             end
         end
-        LogEvent("burning=%s at %.1f (shachi=%s)", tostring(count), os.clock(), tostring(PlayerShachi()))
+        LogEvent("burning=%s", tostring(count))
     end
 end
 
@@ -759,84 +735,41 @@ local function InvulnerableCount(abilities)
     return safe(function() return abilities:GetGameplayTagCount({ TagName = INVULNERABLE_FNAME }) end)
 end
 
--- GE_DodgeInvulnerable did not raise the "Invulnerable" tag in game, so the real tag (if any) is unknown.
--- Log a few likely names once to identify it from a single clash.
-local INVULN_TAG_NAMES = {
-    "Invulnerable",
-    "State.Invulnerable",
-    "CharacterState.Invulnerable",
-    "CharacterState.AbilityState.Invulnerable",
-    "CharacterState.AbilityState.Dodge.Invulnerable",
-    "CharacterState.AbilityState.DodgeInvulnerable",
-}
-local invulnTagFnames = {}
-for i, name in ipairs(INVULN_TAG_NAMES) do
-    invulnTagFnames[i] = { name = name, fname = FName(name, EFindName.FNAME_Add) }
-end
-local invulnTagsLogged = false
-
-local function LogInvulnTags(abilities, label)
-    if invulnTagsLogged or not valid(abilities) then
-        return
-    end
-    invulnTagsLogged = true
-    local parts = {}
-    for _, entry in ipairs(invulnTagFnames) do
-        local count = safe(function()
-            return abilities:GetGameplayTagCount({ TagName = entry.fname })
-        end)
-        parts[#parts + 1] = entry.name .. "=" .. tostring(count)
-    end
-    LogEvent("invuln tags after %s: %s", label, table.concat(parts, ", "))
-end
-
--- The GE path cannot be trusted until the right tag is known. Keep the health at the value it had when
--- the clash landed for the whole window and skip the player's hit reaction, so a hit neither takes
--- health nor puts the player into a stagger.
 local invulnGuardToken = 0
-local invulnUntil = 0
 local hitreactHooked = false
 local hitreactAttempts = 0
-local hitreactSkipped = 0
+local FNameText, CurrentHitState
+-- Match the native deflect hit reaction to the current player's counter or switch ability.
+-- Retain it briefly for the subsequent ConsumeReceivedFrame callback.
+function STABILITY.MarkDeflectSource(target, component, parameter)
+    if not Settings.TriggerOnDeflect or not valid(target) then return end
+    local source = Unwrap(parameter)
+    if not valid(source) then return end
+    local name = FullName(source)
+    if not name:match("^BP_DeflectHitreactAttackSource_C ") then return end
+    local sourcePawn, ability = name:match("^%S+%s+(.+)%.(GA_Hun_[%w_]+_C)_%d+%.BP_DeflectHitreactAttackSource_C_%d+$")
+    if sourcePawn == nil then return end
 
-local function AnimationOf(comp)
-    if not valid(comp) then
-        return "nocomp"
+    local pawn = GetPlayerPawn()
+    if not valid(pawn) or FullName(pawn):match("^%S+%s+(.+)$") ~= sourcePawn then return end
+    if ability ~= "GA_Hun_Long_Counter_C" and ability ~= "GA_Hun_ChiRen_SWT_C" then
+        STABILITY.deflectSource = nil
+        return
     end
-    local runtime = readField(comp, "RuntimeStateData")
-    if runtime == nil then
-        return "noruntime"
-    end
-    local anim = readField(runtime, "StateAnimation")
-    if anim == nil then
-        return "nil"
-    end
-    if not valid(anim) then
-        return "null"
-    end
-    return FullName(anim)
-end
-
-local hitreactLogs = 0
-local hitreactArgLogs = 0
-local FNameText, CurrentHitState, HitreactOwnerName
-function HitreactOwnerName(comp)
-    local owner = safe(function() return comp:GetOuter() end)
-    return valid(owner) and FullName(owner) or "?"
+    local playerKey = STABILITY.PlayerKey()
+    if playerKey == nil then return end
+    STABILITY.deflectSource = {
+        at = os.clock(), playerKey = playerKey, target = target, component = component,
+        switch = ability == "GA_Hun_ChiRen_SWT_C",
+    }
 end
 
 local function SkipHitreact(name, context, ...)
     local self = Unwrap(context)
     local owner = safe(function() return self:GetOuter() end)
-    local ownerName = valid(owner) and FullName(owner) or "?"
     local isPlayer = IsPlayerActor(owner)
-    -- UE4SS only uses the hook return value to overwrite the function's result after the original
-    -- already ran, so returning anything here cannot suppress the reaction and would instead lie to
-    -- the caller about it (bosses included). Always leave the stack empty.
-    if isPlayer and os.clock() < invulnUntil then
-        hitreactSkipped = hitreactSkipped + 1
-        LogEvent("invuln: hitreact during window %s (%d) args=%d anim=%s", name, hitreactSkipped,
-            select("#", ...), AnimationOf(self))
+    if name == "PlayHitreactToAvatar" and not isPlayer then
+        STABILITY.MarkDeflectSource(owner, self, select(1, ...))
     end
     -- A hit clears the temporary fire state. Reapply it immediately (rate-limited) instead of
     -- waiting for the 300 ms burning sample, so the FireSeconds window is covered except for the
@@ -861,25 +794,6 @@ local function SkipHitreact(name, context, ...)
                 end
             end
         end
-    end
-    -- Sample the attacker's own reaction so the interrupt can later play the same animation.
-    if Settings.LogEvents and not isPlayer and hitreactLogs < 20 then
-        hitreactLogs = hitreactLogs + 1
-        LogEvent("hitreact sample: %s owner=%s args=%d anim=%s", name, ownerName, select("#", ...),
-            AnimationOf(self))
-        if hitreactArgLogs < 5 then
-            hitreactArgLogs = hitreactArgLogs + 1
-            local first = Unwrap(select(1, ...))
-            local firstName = valid(first) and FullName(first) or tostring(first)
-            local firstClass = valid(first) and safe(function() return first:GetClass():GetFullName() end)
-                or "?"
-            LogEvent("hitreact sample: first=%s class=%s", tostring(firstName), tostring(firstClass))
-        end
-        STABILITY.After(120, function()
-            if valid(self) then
-                LogEvent("hitreact sample: +120ms anim=%s", AnimationOf(self))
-            end
-        end)
     end
 end
 
@@ -952,7 +866,6 @@ end
 
 local function StartHealthGuard(seconds)
     local untilAt = os.clock() + seconds
-    invulnUntil = untilAt
     if not Settings.HealthGuard then
         LogEvent("invuln guard: disabled by config, relying on the game invulnerability effect")
         return
@@ -1052,106 +965,24 @@ local function TryInvulnerable(seconds)
     invulnToken = invulnToken + 1
     local token = invulnToken
     RemoveInvuln()
-    local before = InvulnerableCount(abilities)
+    local before = Settings.LogEvents and InvulnerableCount(abilities)
     local result = ApplyTimedGe(abilities, ge, seconds)
     if result == nil then
         return
     end
     invulnHandle = result
     STABILITY.invulnOwner = { asc = abilities, key = STABILITY.PlayerKey() }
-    LogEvent("invuln: applied %.1f s handle=%s tag %s -> %s", seconds, HandleText(result),
-        tostring(before), tostring(InvulnerableCount(abilities)))
-    LogInvulnTags(abilities, "apply")
+    if Settings.LogEvents then
+        LogEvent("invuln: applied %.1f s handle=%s tag %s -> %s", seconds, HandleText(result),
+            tostring(before), tostring(InvulnerableCount(abilities)))
+    end
     STABILITY.After(math.floor(seconds * 1000), function()
         if token ~= invulnToken then
             return
         end
         RemoveInvuln()
-        local pawn = GetPlayerPawn()
-        local abilities = valid(pawn) and readField(pawn, "AbilitySystemComponent") or nil
-        LogEvent("invuln: ended, tag=%s", tostring(InvulnerableCount(abilities)))
     end)
 end
-
----------------------------------------------------------------------------------------------------------------------
--- Probe: native invulnerability and endure (temporary)
----------------------------------------------------------------------------------------------------------------------
-
--- The skill tree has an "invulnerable while casting the ultimate" talent, so the shipped game already
--- has a real invulnerability effect; it should suppress the hit reaction too, unlike ignore-damage.
-local NATIVE_INVULN_CLASSES = {
-    "GE_PBZSpecialMoveInvulnerable_C",
-    "GE_PBZLieInvulnerable_C",
-    "GE_TemporaryEndureBase_C",
-    "GE_TemporaryEndureBase_CannotCounter_C",
-}
-local NATIVE_INVULN_PATHS = {
-    "/PBZCombatAsset/Prototypes/GameplayEffects/GE_PBZSpecialMoveInvulnerable.GE_PBZSpecialMoveInvulnerable_C",
-}
-local nativeInvulnProbeDone = false
-
-local function TagText(value)
-    if value == nil then
-        return "nil"
-    end
-    local ok, text = pcall(function() return value:ToString() end)
-    return ok and tostring(text) or tostring(value)
-end
-
-local function LogGeTags(ge, label)
-    if not valid(ge) then
-        return
-    end
-    for _, fn in ipairs({ "GetGrantedTags", "GetAssetTags" }) do
-        local ok, tags
-        if fn == "GetGrantedTags" then
-            ok, tags = pcall(function() return ge:GetGrantedTags() end)
-        else
-            ok, tags = pcall(function() return ge:GetAssetTags() end)
-        end
-        if ok and tags ~= nil then
-            LogEvent("native probe: %s %s=%s", label, fn, TagText(tags))
-        end
-    end
-    local cdo = safe(FindCDO, ge)
-    if valid(cdo) then
-        LogEvent("native probe: %s cdo policy=%s duration=%s", label,
-            tostring(readField(cdo, "DurationPolicy")),
-            tostring(safe(function() return cdo.DurationMagnitude.ScalableFloatMagnitude.Value end)))
-    end
-end
-
-local function TryNativeInvulnProbe()
-    if nativeInvulnProbeDone then
-        return
-    end
-    if not valid(GetPlayerPawn()) then
-        return
-    end
-    nativeInvulnProbeDone = true
-    for _, path in ipairs(NATIVE_INVULN_PATHS) do
-        local loaded = safe(LoadAsset, path)
-        if valid(loaded) then
-            LogEvent("native probe: loaded %s", FullName(loaded))
-            LogGeTags(loaded, "native invuln")
-        else
-            LogEvent("native probe: load failed %s", path)
-        end
-    end
-    for _, class in ipairs(NATIVE_INVULN_CLASSES) do
-        local found = safe(FindAllOf, class)
-        if found and #found > 0 then
-            for index = 1, math.min(#found, 2) do
-                if valid(found[index]) then
-                    LogEvent("native probe: %s -> %s", class, FullName(found[index]))
-                end
-            end
-        else
-            LogEvent("native probe: %s not loaded", class)
-        end
-    end
-end
-
 
 ---------------------------------------------------------------------------------------------------------------------
 -- Break on clash
@@ -1159,49 +990,6 @@ end
 
 local lastBreakName = nil
 local lastBreakAt = 0
-
-local function FindClashTarget()
-    local comps = safe(FindAllOf, "HitreactComponent")
-    if not comps then
-        return nil
-    end
-    local pawn = GetPlayerPawn()
-    local playerName = valid(pawn) and FullName(pawn) or nil
-    local playerLoc = nil
-    if valid(pawn) then
-        local root = readField(pawn, "RootComponent")
-        if valid(root) then
-            playerLoc = readField(root, "RelativeLocation")
-        end
-    end
-    local best, bestDist = nil, nil
-    for _, comp in ipairs(comps) do
-        if valid(comp) then
-            local owner = safe(function() return comp:GetOuter() end)
-            if valid(owner) then
-                local name = FullName(owner)
-                if name ~= playerName and not name:find("Hun", 1, true) then
-                    local dist = 0
-                    if playerLoc then
-                        local root = readField(owner, "RootComponent")
-                        if valid(root) then
-                            local loc = readField(root, "RelativeLocation")
-                            if loc then
-                                local dx, dy, dz = loc.X - playerLoc.X, loc.Y - playerLoc.Y,
-                                    loc.Z - playerLoc.Z
-                                dist = dx * dx + dy * dy + dz * dz
-                            end
-                        end
-                    end
-                    if best == nil or dist < bestDist then
-                        best, bestDist = owner, dist
-                    end
-                end
-            end
-        end
-    end
-    return best
-end
 
 function FNameText(value)
     if value == nil then
@@ -1276,11 +1064,6 @@ local function AddBreakMeter(name, now)
     return entry.count
 end
 
--- A boss playing a new montage is the only reliable "the AI is moving again" signal: the hit state
--- name returns to Normal even while the boss stays parked. The montage hook below logs the boss's
--- plays around a break so a test can tell recovered from stuck without watching the screen.
-local breakWatchName = nil
-local breakWatchUntil = 0
 local breakStartedAt = 0
 
 -- PlayHitreactToAvatar with a constructed Break attack source drives the whole reaction natively:
@@ -1357,7 +1140,7 @@ ApplyBreakSource = function(target, label)
         LogEvent("break source %s: %s", label, notes)
         return false
     end
-    if not breakSourceLogged then
+    if Settings.LogEvents and not breakSourceLogged then
         breakSourceLogged = true
         LogEvent("break source: %s strength=%s style=%s type=%s dir=%s (%s)", FullName(src),
             TagText(safe(function() return src:GetHitStrength() end)),
@@ -1376,19 +1159,6 @@ end
     -- Export the native hitreact source builder for the switch-GP tornado damage.
     STABILITY.makeBreakSource = MakeBreakSource
 
-end
-
-local function WatchBreakState(comp, token, label)
-    if not Settings.LogEvents then return end
-    local ownerKey = STABILITY.PlayerKey()
-    for _, delay in ipairs({ 300, 900, 1800, 3000, 5000 }) do
-        STABILITY.After(delay, function()
-            if token ~= breakToken or not STABILITY.SamePlayer(ownerKey) or not valid(comp) then
-                return
-            end
-            LogEvent("%s: +%.1f s state=%s", label, delay / 1000, CurrentHitState(comp))
-        end)
-    end
 end
 
 -- The player's next hit replaces Break with a plain hit reaction within a few frames, so the enemy
@@ -1433,22 +1203,10 @@ end
 -- The interrupt charges up over several clashes and is refused inside the game's own unbashable
 -- windows, so the source is retried twice before the meter is dropped.
 local BREAK_DEDUPE_SECONDS = 0.8
-local BREAK_WATCH_SECONDS = 5.0
 local BREAK_RETRY_DELAYS_MS = { 150, 400 }
 
-local function TryBreakClash(isBlock, reason)
-    if isBlock then
-        LogEvent("break: %s, meter skipped", reason or "block impact")
-        return
-    end
-    if not Settings.BreakOnClash then
-        return
-    end
-    local target = FindClashTarget()
-    if not valid(target) then
-        LogEvent("break: no target")
-        return
-    end
+local function TryBreakClash(target, comp)
+    if not Settings.BreakOnClash or not valid(target) then return end
     local name = FullName(target)
     local now = os.clock()
     if name == lastBreakName and now - lastBreakAt < BREAK_DEDUPE_SECONDS then
@@ -1462,7 +1220,6 @@ local function TryBreakClash(isBlock, reason)
         return
     end
     breakMeter[meterName] = nil
-    local comp = HitreactCompOf(target)
     if not valid(comp) then
         LogEvent("break meter full: %s (%d/%d); no hitreact component", meterName, count,
             Settings.BreakThreshold)
@@ -1470,21 +1227,18 @@ local function TryBreakClash(isBlock, reason)
     end
     breakToken = breakToken + 1
     local token = breakToken
-    breakWatchName = name
-    breakWatchUntil = now + BREAK_WATCH_SECONDS
     breakStartedAt = now
     LogEvent("break meter full: %s (%d/%d); playing the native Break hitreact", meterName, count,
         Settings.BreakThreshold)
-    local watched = false
+    local maintaining = false
     local ownerKey = STABILITY.PlayerKey()
     local function attempt(label)
         if token ~= breakToken or not STABILITY.SamePlayer(ownerKey) or not valid(target) then
             return false
         end
         if ApplyBreakSource(target, label) then
-            if not watched then
-                watched = true
-                WatchBreakState(comp, token, "break source")
+            if not maintaining then
+                maintaining = true
                 MaintainBreak(target, comp, token)
             end
             return true
@@ -1501,10 +1255,6 @@ local function TryBreakClash(isBlock, reason)
         end)
     end
 end
-
-local lastBlockImpactAt = 0
-local lastAttackAt = 0
-local blockHookState = { hooked = false, attempts = 0 }
 
 ---------------------------------------------------------------------------------------------------------------------
 -- 风回云卷 (GA_Hun_ChiRen_BSup): clash streak and blade-force tier
@@ -1539,142 +1289,6 @@ BladeBuffTier = function(abilities)
         if count and count > 0 then return tier end
     end
     return 0
-end
-
-end
-
----------------------------------------------------------------------------------------------------------------------
--- Damage log: which action did how much
----------------------------------------------------------------------------------------------------------------------
-
--- The action name comes from the ability activation hooks; the damage comes from sampling the
--- nearest enemy's Health. A hit is credited to an action started within ACTION_WINDOW_SECONDS;
--- anything later (burning, other sources) is logged without an action. Hits of the same action are
--- summed until the action changes or the window lapses.
-local NoteAction, TickDamage
-
-do
-
-local SAMPLE_SECONDS = 0.2
-local TARGET_REFRESH_SECONDS = 1.0
-local ACTION_WINDOW_SECONDS = 1.5
-
-local target = nil
-local targetName = nil
-local lastHp = nil
-local lastSampleAt = 0
-local lastTargetAt = 0
-local lastAction = nil
-local lastActionAt = 0
-local pendingAction = nil
-local pendingTarget = nil
-local pendingStartAt = 0
-local pendingLastAt = 0
-local pendingDamage = 0
-local pendingHits = 0
-local lastWatchAt = 0
-
-local function ShortName(full)
-    if not full then return "?" end
-    return full:match("([^%.]+)$") or full
-end
-
-NoteAction = function(label)
-    if not Settings.LogDamage then return end
-    lastAction = label
-    lastActionAt = os.clock()
-end
-
-local function ActorHealth(actor)
-    local set = readField(actor, "AttributeSetBase")
-    if not valid(set) then return nil end
-    return readNumber(set, "Health")
-end
-
-local function FlushDamage(reason)
-    if pendingAction == nil or pendingHits == 0 then
-        pendingAction, pendingDamage, pendingHits = nil, 0, 0
-        return
-    end
-    LogKey("action damage: %s on %s = %.0f over %d hit(s) in %.2f s (%s)", pendingAction,
-        pendingTarget or "?", pendingDamage, pendingHits, pendingLastAt - pendingStartAt, reason)
-    pendingAction, pendingTarget, pendingDamage, pendingHits = nil, nil, 0, 0
-end
-
-local function CreditDamage(amount, now)
-    local action = nil
-    if lastAction and now - lastActionAt <= ACTION_WINDOW_SECONDS then
-        action = lastAction
-    end
-    if action == nil then
-        FlushDamage("no action")
-        LogEvent("damage: %.0f on %s (no recent action)", amount, targetName or "?")
-        return
-    end
-    if pendingAction ~= action then
-        FlushDamage("action changed")
-        pendingAction = action
-        pendingStartAt = now
-    end
-    pendingLastAt = now
-    pendingDamage = pendingDamage + amount
-    pendingHits = pendingHits + 1
-    pendingTarget = targetName
-    LogKey("damage hit: %.0f %s on %s", amount, action, targetName or "?")
-end
-
-TickDamage = function(now)
-    if not Settings.LogDamage then return end
-    if pendingAction and now - pendingLastAt > ACTION_WINDOW_SECONDS then
-        FlushDamage("window ended")
-    end
-    if now - lastSampleAt < SAMPLE_SECONDS then return end
-    lastSampleAt = now
-    if not valid(target) or now - lastTargetAt >= TARGET_REFRESH_SECONDS then
-        lastTargetAt = now
-        local found = FindClashTarget()
-        local foundName = valid(found) and FullName(found) or nil
-        -- UObject wrappers compare by reference, so the same actor can come back as a new wrapper.
-        -- Compare names instead of objects, otherwise the baseline resets on every refresh.
-        if foundName ~= targetName then
-            if pendingAction then FlushDamage("target changed") end
-            targetName = foundName
-            lastHp = valid(found) and ActorHealth(found) or nil
-        end
-        target = found
-    end
-    if not valid(target) then
-        lastHp = nil
-        if now - lastWatchAt >= 3.0 then
-            lastWatchAt = now
-            LogEvent("damage watch: no target")
-        end
-        return
-    end
-    local hp = ActorHealth(target)
-    if hp == nil then
-        if now - lastWatchAt >= 3.0 then
-            lastWatchAt = now
-            LogEvent("damage watch: %s hp unreadable", ShortName(targetName))
-        end
-        return
-    end
-    if now - lastWatchAt >= 3.0 then
-        lastWatchAt = now
-        LogEvent("damage watch: %s hp=%.0f", ShortName(targetName), hp)
-    end
-    if lastHp == nil then
-        lastHp = hp
-        return
-    end
-    local delta = hp - lastHp
-    lastHp = hp
-    if delta < -0.5 then
-        CreditDamage(-delta, now)
-    elseif delta > 0.5 then
-        FlushDamage("target healed")
-        LogEvent("damage: heal +%.0f on %s", delta, targetName or "?")
-    end
 end
 
 end
@@ -1895,28 +1509,22 @@ function CLASH_SLOWMO.start(enabled, speed, seconds)
     end
 end
 
-local function GrantCharges(reason, isBlock, isSwitchGp)
+local function GrantCharges(source)
     local now = os.clock()
-    if isBlock then
-        -- A block also consumes a deflect frame, but it is not a clash. It used to grant the full
-        -- reward here, which made repeated blocks light the blade and refresh the free attacks.
-        LogEvent("clash skipped (block): %s", reason)
-        TryBreakClash(true, reason)
-        return
-    end
+    local isSwitchGp = source.switch
     if now - lastClash < Settings.CooldownSeconds then return end
     lastClash = now
     charges = Settings.Charges
-    LogEvent("clash (%s): %d free heavy attacks%s", reason, charges, isSwitchGp and " [switch GP]" or "")
+    LogEvent("clash: %d free heavy attacks%s", charges, isSwitchGp and " [switch GP]" or "")
     TryFire()
     TryInvulnerable()
-    -- A switch-attack GP keeps the free heavies, fire and invulnerability only: it neither builds the
-    -- whirlwind streak nor shares the clash slow-motion toggle.
+    -- Both moves get the general clash rewards. The whirlwind streak and its
+    -- easy-cast tier boost belong to the heavy-light counter.
     if not isSwitchGp then
         TORNADO.combo = math.min(TORNADO.combo + 1, Settings.TornadoClashMax)
         LogEvent("tornado combo: %d/%d", TORNADO.combo, Settings.TornadoClashMax)
     end
-    TryBreakClash(false, reason)
+    TryBreakClash(source.target, source.component)
     if isSwitchGp then
         CLASH_SLOWMO.start(Settings.SwitchSlowmoEnabled, Settings.SwitchSlowmoSpeed, Settings.SwitchSlowmoSeconds)
         -- Match the execution's timing: the tornado erupts as the sweep follows through.
@@ -1929,143 +1537,13 @@ local function GrantCharges(reason, isBlock, isSwitchGp)
         end
     else
         CLASH_SLOWMO.start(Settings.ClashSlowmoEnabled, Settings.ClashSlowmoSpeed, Settings.ClashSlowmoSeconds)
-    end
-    TORNADO.topTier()
-end
-
----------------------------------------------------------------------------------------------------------------------
--- Temporary probes: montage/ability names and block/clash split
----------------------------------------------------------------------------------------------------------------------
-
-local montageHooked = false
-local montageLogs = 0
-
-local function TryMontageHook()
-    if montageHooked then
-        return
-    end
-    local ok, err = STABILITY.TryRegisterHook("/Script/Engine.AnimInstance:Montage_Play", function(context, montage)
-        if not Settings.ProbeSwitchAttack and os.clock() > breakWatchUntil then
-            return
-        end
-        local self = Unwrap(context)
-        local owner = safe(function() return self:GetOwningActor() end)
-        if not valid(owner) then
-            owner = safe(function() return self:GetOuter() end)
-        end
-        local ownerName = valid(owner) and FullName(owner) or "?"
-        local anim = Unwrap(montage)
-        local animName = valid(anim) and FullName(anim) or tostring(anim)
-        if os.clock() <= breakWatchUntil then
-            if breakWatchName and ownerName == breakWatchName then
-                LogEvent("break watch: montage %s at +%.2f s", animName, os.clock() - breakStartedAt)
-            end
-            return
-        end
-        if not IsPlayerActor(owner) then
-            return
-        end
-        if montageLogs >= 200 then
-            return
-        end
-        montageLogs = montageLogs + 1
-        LogEvent("ga probe: montage %s", animName)
-    end)
-    montageHooked = true
-    LogEvent("ga probe: montage hook ok=%s%s", tostring(ok), ok and "" or (" err=" .. tostring(err)))
-end
-
-local CHIREN_GA_BASES = {
-    "GA_Hun_ChiRen_A", "GA_Hun_ChiRen_AA", "GA_Hun_ChiRen_AAA", "GA_Hun_ChiRen_AAAA",
-    "GA_Hun_ChiRen_AAAAB", "GA_Hun_ChiRen_AAAABB", "GA_Hun_ChiRen_AAAB", "GA_Hun_ChiRen_AAABB",
-    "GA_Hun_ChiRen_AAB", "GA_Hun_ChiRen_AABB", "GA_Hun_ChiRen_AB", "GA_Hun_ChiRen_ABB",
-    "GA_Hun_ChiRen_B", "GA_Hun_ChiRen_BB", "GA_Hun_ChiRen_BBB", "GA_Hun_ChiRen_BD",
-    "GA_Hun_ChiRen_BSup", "GA_Hun_ChiRen_C", "GA_Hun_ChiRen_SWT",
-}
-local chirenGaTried = false
-
-local function HookChiRenGas()
-    if chirenGaTried then
-        return
-    end
-    chirenGaTried = true
-    local hooked = 0
-    for _, base in ipairs(CHIREN_GA_BASES) do
-        local path = "/PBZCombatAsset/ActorData/Players/Hun/Abilities/LongBlade/ChiRen/" ..
-            base .. "." .. base .. "_C"
-        local class = safe(LoadAsset, path)
-        if not valid(class) then
-            local found = safe(FindAllOf, base .. "_C")
-            if found and found[1] and valid(found[1]) then
-                class = safe(function() return found[1]:GetClass() end)
-            end
-        end
-        if valid(class) then
-            local classPath = FullName(class):gsub("^%S+%s+", "")
-            local ok = STABILITY.TryRegisterHook(classPath .. ":K2_ActivateAbility", function(context)
-                local self = Unwrap(context)
-                LogEvent("ga probe: %s on %s", base, FullName(self))
-            end)
-            if ok then
-                hooked = hooked + 1
-            end
-        end
-    end
-    LogEvent("ga probe: hooked %d/%d ChiRen abilities", hooked, #CHIREN_GA_BASES)
-end
-
-local function TryBlockHook()
-    if blockHookState.hooked then
-        return
-    end
-    if not STABILITY.DiscoveryReady("block") then return end
-    -- The Impact UFunction lives on the stance action class itself, not on the owning ability that
-    -- FindAllOf happens to return first (GA_Hun_Long_Stance_C has no On Impact). Use the fixed class
-    -- path, matching the heavenorhell reference that hooks this successfully.
-    local ok, err = STABILITY.TryRegisterHook(
-        "/PBZDeflectSystem/Abilities/BP_StanceAction_Base_Player.BP_StanceAction_Base_Player_C:On Impact",
-        function()
-            lastBlockImpactAt = os.clock()
-        end)
-    if ok then
-        blockHookState.hooked = true
-        LogEvent("block probe: hooked On Impact")
-    else
-        blockHookState.attempts = blockHookState.attempts + 1
-        if STABILITY.HookExhausted("/PBZDeflectSystem/Abilities/BP_StanceAction_Base_Player.BP_StanceAction_Base_Player_C:On Impact") then
-            blockHookState.hooked = true
-            logError("block hook unavailable after 3 attempts: " .. tostring(err))
-        end
+        TORNADO.topTier()
     end
 end
 
----------------------------------------------------------------------------------------------------------------------
--- Clash trigger: player's DeflectComponent consumes a deflect frame
----------------------------------------------------------------------------------------------------------------------
-
-local stanceProbeLogs = 0
-
--- A held block keeps the stance action in its deflect state; a weapon clash happens while attacking,
--- so the stance stays out of it. The old "any heavy in the last 1.5 s" guess dropped most clashes.
-local function ReadStanceState()
-    local stances = safe(FindAllOf, "BP_StanceAction_Base_Player_C")
-    if not stances or #stances == 0 then
-        return nil, "no stance instance"
-    end
-    local parts = {}
-    for _, stance in ipairs(stances) do
-        if valid(stance) then
-            local inDeflect = readField(stance, "In Deflect")
-            local inCombo = readField(stance, "In Combo")
-            parts[#parts + 1] = string.format("deflect=%s combo=%s", tostring(inDeflect),
-                tostring(inCombo))
-            if inDeflect == true then
-                return true, table.concat(parts, "; ")
-            end
-        end
-    end
-    return false, table.concat(parts, "; ")
-end
+-- On current builds the hit reaction precedes frame consumption by a few milliseconds.
+-- Missing or expired evidence leaves the game's native deflect behavior alone.
+local DEFLECT_SOURCE_SECONDS = 0.10
 
 local function TryDeflectHook()
     if hookedDeflect or not Settings.TriggerOnDeflect then return end
@@ -2077,39 +1555,22 @@ local function TryDeflectHook()
     local ok, err = STABILITY.TryRegisterHook(classPath .. ":ConsumeReceivedFrame", function(context)
         local self = Unwrap(context)
         local owner = safe(function() return self:GetOuter() end)
-        if not (IsPlayerActor(owner) or FullName(self):find("BP_Renewal_Hun", 1, true)) then
+        if not IsPlayerActor(owner) then return end
+        local source = STABILITY.deflectSource
+        STABILITY.deflectSource = nil
+        if source == nil then
+            if Settings.LogEvents and (STABILITY.unmatchedDeflectLogs or 0) < 12 then
+                STABILITY.unmatchedDeflectLogs = (STABILITY.unmatchedDeflectLogs or 0) + 1
+                LogEvent("deflect ignored: no matching clash or switch hit reaction")
+            end
             return
         end
-        local attackAge = os.clock() - lastAttackAt
-        local blockAge = os.clock() - lastBlockImpactAt
-        local inDeflect, stanceText = ReadStanceState()
-        -- The switch attack records its activation time; a deflect frame consumed inside the injected
-        -- startup window (plus a small margin for the hit to land) is a switch GP.
-        local switchAge = os.clock() - (STABILITY.switchGpAt or -1e9)
-        local isSwitchGp = Settings.SwitchDeflectInject and
-            switchAge <= Settings.SwitchDeflectFrames / 30 + 0.15
-        -- The stance On Impact hook fires for a block/parry but not for a weapon clash, so a fresh
-        -- block impact wins over the attack-age guess: a held block followed by an attack press was
-        -- being credited as a clash and interrupted the boss. A switch GP is an attack, so a block
-        -- press just before the switch must not swallow its reward.
-        local isBlock
-        if isSwitchGp then
-            isBlock = false
-        elseif blockAge <= 0.5 then
-            isBlock = true
-        elseif attackAge <= 0.8 then
-            isBlock = false
-        elseif inDeflect == true then
-            isBlock = true
-        else
-            isBlock = false
-        end
-        if stanceProbeLogs < 40 then
-            stanceProbeLogs = stanceProbeLogs + 1
-            LogEvent("clash stance: attackAge=%.2f inDeflect=%s isBlock=%s switch=%s [%s]",
-                attackAge, tostring(inDeflect), tostring(isBlock), tostring(isSwitchGp), stanceText)
-        end
-        GrantCharges("deflect frame consumed", isBlock, isSwitchGp)
+        local age = os.clock() - source.at
+        if age < 0 or age > DEFLECT_SOURCE_SECONDS or not STABILITY.SamePlayer(source.playerKey)
+            or not valid(source.target) then return end
+        if source.switch and not (Settings.SwitchDeflectInject and Settings.SwitchDeflectFrames > 0)
+            and not Settings.SwitchAttackBlock then return end
+        GrantCharges(source)
     end)
     if ok then
         hookedDeflect = true
@@ -2295,7 +1756,7 @@ RestoreTornadoBullets = function(reason)
         tornadoPatch = nil
         tornadoPatchToken = tornadoPatchToken + 1
     end
-    LogKey("tornado damage: restored (%s), pending=%d", reason, pending)
+    LogEvent("tornado damage: restored (%s), pending=%d", reason, pending)
     return pending == 0
 end
 
@@ -2429,7 +1890,7 @@ local function ApplyTornadoBurn(seconds)
         fireAppliedAt = os.clock()
         fireUntil = fireAppliedAt + seconds
         fireAskedSeconds = seconds
-        LogKey("tornado burn: applied %.1f s", seconds)
+        LogEvent("tornado burn: applied %.1f s", seconds)
     end
 end
 
@@ -2452,9 +1913,8 @@ OnTornadoCast = function(self, freeAttack)
     STABILITY.tornadoCastAt = os.clock()
     STABILITY.tornadoCastAbility = valid(self) and self:GetAddress() or nil
     STABILITY.tornadoCastInvuln = Settings.TornadoInvulnSeconds
-    LogKey("tornado cast: streak=%d tier=%d multiplier=x%.2f free=%s%s", streak, tier, factor,
+    LogEvent("tornado cast: streak=%d tier=%d multiplier=x%.2f free=%s%s", streak, tier, factor,
         tostring(freeAttack), reused and " followup" or "")
-    NoteAction(string.format("GA_Hun_ChiRen_BSup_C x%.2f%s", factor, reused and " followup" or ""))
     TORNADO.combo = 0
 
     if Settings.TornadoInvulnSeconds > 0 then
@@ -2501,8 +1961,6 @@ local function HeavyActivate(name, self, classPath)
         -- already landed here, and the ability UObject is reused across activations (a later read could
         -- belong to the next hit). The number copy decouples the refund from instance reuse.
         local consumedSnapshot = readNumber(self, "Actual Shachi Consumed")
-        lastAttackAt = os.clock()
-        NoteAction(name)
         if heavyActivateLogs < 200 then
             heavyActivateLogs = heavyActivateLogs + 1
             LogEvent("heavy activate: %s", name)
@@ -2536,9 +1994,6 @@ local function HeavyActivate(name, self, classPath)
         if original.cost == nil then
             logError("heavy cost disabled: reflected Shachi Cost missing on " .. classPath)
             return
-        end
-        if STABILITY.diagnostics and Settings.ProbeBurnVisual then
-            STABILITY.RunBounded("burn diagnostics", STABILITY.diagnostics.requestBurnSample)
         end
         local freeAttack = charges > 0
         if charges > 0 then
@@ -2612,7 +2067,7 @@ local function HookHeavy(name)
                             end
                         end)
                     if pOk then anyOk = true end
-                    LogEvent("heavy probe %s parent=%s hook ok=%s%s", name, parentPath,
+                    LogEvent("heavy hook %s parent=%s hook ok=%s%s", name, parentPath,
                         tostring(pOk), pOk and "" or (" err=" .. tostring(pErr)))
                     if not pOk then
                         -- BP_B_Base_C / BP_BBB_Base_C are empty; the event graph is one level up.
@@ -2633,14 +2088,14 @@ local function HookHeavy(name)
                                         end
                                     end)
                                 if gOk then anyOk = true end
-                                LogEvent("heavy probe %s grandparent=%s hook ok=%s%s", name, grandPath,
+                                LogEvent("heavy hook %s grandparent=%s hook ok=%s%s", name, grandPath,
                                     tostring(gOk), gOk and "" or (" err=" .. tostring(gErr)))
                             end
                         end
                     end
                 end
             else
-                LogEvent("heavy probe %s has no SuperStruct", name)
+                LogEvent("heavy hook %s has no SuperStruct", name)
             end
         end
     end
@@ -2663,7 +2118,7 @@ local function HookHeavy(name)
             local address = valid(ability) and ability:GetAddress() or nil
             if STABILITY.tornadoCastAbility ~= nil and address ~= STABILITY.tornadoCastAbility then return end
             if STABILITY.tornadoCastAt and (STABILITY.tornadoCastAbility == nil or address == STABILITY.tornadoCastAbility) then
-                LogKey("tornado end: %.2f s (invuln asked %.1f s)", os.clock() - STABILITY.tornadoCastAt,
+                LogEvent("tornado end: %.2f s (invuln asked %.1f s)", os.clock() - STABILITY.tornadoCastAt,
                     STABILITY.tornadoCastInvuln)
                 STABILITY.tornadoCastAt = nil
                 STABILITY.tornadoCastAbility = nil
@@ -2679,57 +2134,6 @@ local function HookHeavy(name)
     end
 end
 
-
-local hookedAttack = {}
-local attackHookLogs = 0
-
-local function HookAttack(name)
-    if hookedAttack[name] then
-        return
-    end
-    if not STABILITY.DiscoveryReady("attack:" .. name) then return end
-    local objects = safe(FindAllOf, name)
-    if not objects or #objects == 0 then
-        return
-    end
-    local classPath = classPathOf(objects[1])
-    if not classPath then
-        return
-    end
-    local ok, err = STABILITY.TryRegisterHook(classPath .. ":K2_ActivateAbility", function()
-        lastAttackAt = os.clock()
-        NoteAction(name)
-        if attackHookLogs < 30 then
-            attackHookLogs = attackHookLogs + 1
-            LogEvent("attack activate: %s", name)
-        end
-    end)
-    if ok then
-        hookedAttack[name] = true
-        STABILITY.attackHookedOk = (STABILITY.attackHookedOk or 0) + 1
-        LogKey("hooked attack %s", name)
-    else
-        if STABILITY.HookExhausted(classPath .. ":K2_ActivateAbility") then
-            hookedAttack[name] = true
-        end
-        -- Light-attack hooks only refresh lastAttackAt (the clash check falls back to stance) and feed
-        -- the damage log, so a missing one is diagnostic, not a functional error.
-        LogEvent("attack hook %s: %s", name, tostring(err))
-    end
-    if not STABILITY.attackSummaryLogged then
-        local allDone = true
-        for _, n in ipairs(ATTACK_CLASSES) do
-            if not hookedAttack[n] then
-                allDone = false
-                break
-            end
-        end
-        if allDone then
-            STABILITY.attackSummaryLogged = true
-            LogKey("attack hooks: %d/%d active", STABILITY.attackHookedOk or 0, #ATTACK_CLASSES)
-        end
-    end
-end
 
 ---------------------------------------------------------------------------------------------------------------------
 -- Block-parry perfect window
@@ -2795,9 +2199,6 @@ local SWITCH_DEFLECT = {
     guidA = 0x43484952, guidB = 0x454E5357, track = 15,
     broken = false, logs = 0, frameClass = nil, serial = 0,
 }
-
--- The probe body is defined after ProbeLog so it can share the probe log budget.
-local ProbeSwitchActivate
 
 -- nil = unknown: the weapon asset or its tag table is not loaded yet.
 local function ChiRenEquipped(ability)
@@ -2938,7 +2339,7 @@ local function KeepTick()
     if tier ~= st.lastTier then
         if st.tierLogs < 40 then
             st.tierLogs = st.tierLogs + 1
-            LogKey("switch keep: tier %s->%d", tostring(st.lastTier), tier)
+            LogEvent("switch keep: tier %s->%d", tostring(st.lastTier), tier)
         end
         st.lastTier = tier
     end
@@ -2998,7 +2399,7 @@ local function KeepTick()
         st.frozen = { tier = st.snap.tier, fire = st.snap.fire, at = st.snap.at }
         if st.logs < 20 then
             st.logs = st.logs + 1
-            LogKey("switch keep: frozen tier=%d fire=%d", st.frozen.tier, st.frozen.fire)
+            LogEvent("switch keep: frozen tier=%d fire=%d", st.frozen.tier, st.frozen.fire)
         end
     end
     st.wasEquipped = equipped
@@ -3057,7 +2458,7 @@ local function KeepTick()
     end
     if st.logs < 20 then
         st.logs = st.logs + 1
-        LogKey("switch keep: restored tier %d->%d fire %d (snap tier=%d fire=%d)",
+        LogEvent("switch keep: restored tier %d->%d fire %d (snap tier=%d fire=%d)",
             tier, before, snap.fire, snap.tier, snap.fire)
     end
     st.frozen = nil
@@ -3353,9 +2754,6 @@ function ApplyIgniteToEnemy(enemy, seconds)
         if layer == 1 then ge = ResolveIgniteGe() else ge = ResolveIgniteDotGe() end
         if valid(ge) then
             local cdo = FindCDO(ge)
-            if layer == 2 and STABILITY.finishProbe then
-                STABILITY.RunBounded("native finish metadata", STABILITY.finishProbe, enemy, cdo)
-            end
             local policy = valid(cdo) and readField(cdo, "DurationPolicy") or nil
             local magnitude = valid(cdo) and readField(cdo, "DurationMagnitude") or nil
             local restore = magnitude and SetTemporaryDuration(magnitude, seconds, "tornado ignite")
@@ -3539,7 +2937,6 @@ end
 -- and CurrentValue: the attribute aggregator recomputes CurrentValue from BaseValue.
 function SwitchTornadoDamageTick(damage, tickIndex, isLast, tornadoComp)
     -- Optional test multiplier; the key is absent from the release config, so this defaults to 1.
-    damage = damage * (Settings.TestDamageScale or 1)
     local pawn = GetPlayerPawn()
     if not valid(pawn) then return end
     -- World locations, not RootComponent.RelativeLocation (which is parent-relative and can be 0).
@@ -3582,9 +2979,6 @@ function SwitchTornadoDamageTick(damage, tickIndex, isLast, tornadoComp)
                             if dist > 1 then cos = (dx * forwardX + dy * forwardY) / dist end
                             if cos >= cosLimit then
                                 hits = hits + 1
-                                if STABILITY.diagnostics then
-                                    STABILITY.RunBounded("target diagnostics", STABILITY.diagnostics.inspectTarget, enemy)
-                                end
                                 pcall(function()
                                     local eset = readField(enemy, "AttributeSetBase")
                                     if not valid(eset) then return end
@@ -3607,28 +3001,6 @@ function SwitchTornadoDamageTick(damage, tickIndex, isLast, tornadoComp)
                                         applied = applied + 1
                                         RefreshEnemyBossBar(enemy, after)
                                     end
-                                    -- Native finishing blow: at the 1 HP cap the DoT cannot be relied on to
-                                    -- kill (it ticks 0 sometimes). Route a lethal hit through the boss's own
-                                    -- damage interface so the native death/phase event fires, instead of
-                                    -- writing 0 directly (which stuck the boss). Once per enemy.
-                                    if Settings.TestNativeFinish and STABILITY.IsFiniteNumber(after) and after <= 1 then
-                                        local ekey = safe(function() return enemy:GetAddress() end)
-                                        STABILITY.nativeFinished = STABILITY.nativeFinished or {}
-                                        if ekey and not STABILITY.nativeFinished[ekey] then
-                                            STABILITY.nativeFinished[ekey] = true
-                                            local fok, ferr = pcall(function()
-                                                enemy:BPI_TakeDamage({
-                                                    HPDamageValue = after,
-                                                    DamagePhysicValue = { DamagePoint = eloc, DamageDirection = { X = 0, Y = 0, Z = 1 }, Impact = 0 },
-                                                    InstigatorCharacter = pawn,
-                                                    HitComponent = nil,
-                                                })
-                                            end)
-                                            local post = readNumber(eset, "Health")
-                                            LogKey("tornado finish: BPI_TakeDamage hp=%.0f ok=%s post=%s%s",
-                                                after, tostring(fok), tostring(post), fok and "" or (" err=" .. tostring(ferr)))
-                                        end
-                                    end
                                 end)
                                 if reactSrc ~= nil then
                                     pcall(function() comp:PlayHitreactToAvatar(reactSrc) end)
@@ -3646,7 +3018,7 @@ function SwitchTornadoDamageTick(damage, tickIndex, isLast, tornadoComp)
             end
         end
     end
-    LogEvent("switch gp tornado tick %d: hits=%d applied=%d testScale=x%s center=(%.0f,%.0f)", tickIndex, hits, applied, tostring(Settings.TestDamageScale or 1), center.X, center.Y)
+    LogEvent("switch gp tornado tick %d: hits=%d applied=%d center=(%.0f,%.0f)", tickIndex, hits, applied, center.X, center.Y)
 
 end
 
@@ -3680,7 +3052,7 @@ function ApplySwitchGpTornadoDamage(tornadoComp)
     local ticks = math.max(1, math.floor(Settings.SwitchTornadoTicks))
     local perTick = total / ticks
     local intervalMs = math.max(16, math.floor(Settings.SwitchTornadoTickSeconds * 1000 / ticks))
-    LogKey("switch gp tornado damage: base=%.1f attack=%.0f total=%.0f ticks=%d interval=%dms",
+    LogEvent("switch gp tornado damage: base=%.1f attack=%.0f total=%.0f ticks=%d interval=%dms",
         base, attack, total, ticks, intervalMs)
     for i = 1, ticks do
         local idx, last = i, (i == ticks)
@@ -3768,32 +3140,12 @@ function SpawnSwitchGpTornado()
             { X = 1, Y = 1, Z = 1 }, true, true, 0, true)
     end)
     if ok and comp ~= nil then
-        LogKey("switch gp firetornado: spawned")
+        LogEvent("switch gp firetornado: spawned")
         PlayWwiseEvent("/Game/Wwise/Events/SFX/Combat/Special/Hero_Special/Hun/Common/Wave_Stab_BaDao/ChiRen/ChiRen/SFX_Combat_Hun_ChiRen_Wave_Fire.SFX_Combat_Hun_ChiRen_Wave_Fire", pawn)
         local dmgOk, dmgErr = xpcall(function() ApplySwitchGpTornadoDamage(comp) end, debug.traceback)
         if not dmgOk then logError("tornado damage: " .. tostring(dmgErr)) end
         if Settings.SwitchTornadoSpeed > 0 then
             MoveSwitchTornado(comp, yaw, Settings.SwitchTornadoSpeed)
-        end
-        -- Probe the component's user-exposed parameters: if the system has Speed/Target style
-        -- variables, movement can be tuned from here. pcall here so a missing binding stays quiet.
-        if Settings.ProbeSwitchAttack then
-            local okVars, vars = pcall(function() return comp:GetAllUserVariables() end)
-            if okVars and vars then
-                LogKey("switch gp firetornado: user vars=%d", #vars)
-                for i = 1, math.min(#vars, 20) do
-                    local entry = vars[i]
-                    local label = tostring(entry)
-                    local okName, nameField = pcall(function() return entry.Name end)
-                    if okName and nameField ~= nil then
-                        local okStr, text = pcall(function() return nameField:ToString() end)
-                        if okStr and type(text) == "string" then label = text end
-                    end
-                    LogKey("switch gp firetornado: var %d %s", i, label)
-                end
-            else
-                LogKey("switch gp firetornado: user vars not exposed")
-            end
         end
         -- Looping system: auto-destroy never fires. Deactivate stops emission; the component itself
         -- needs the owner's blueprint destroy route (DestroyComponent is not exposed on this build).
@@ -3813,26 +3165,9 @@ function SpawnSwitchGpTornado()
 end
 
 local function TuneClashWindow(context)
-    if Settings.ProbeSwitchAttack and ProbeSwitchActivate then
-        ProbeSwitchActivate(context)
-    end
     TuneSwitchAttack(context)
     SWITCH_DEFLECT.inject(context)
     KeepBack(context)
-    -- The switch attack is not in ATTACK_CLASSES/HEAVY_CLASSES, so its activation never refreshes
-    -- lastAttackAt. Without this the deflect frame we inject can be credited as a held block
-    -- (attackAge stale, inDeflect true) and lose the clash reward. Refresh on the base hook: event
-    -- driven, no extra polling.
-    local switchAbility = Unwrap(context)
-    if valid(switchAbility) then
-        local switchClass = safe(function() return switchAbility:GetClass():GetFName():ToString() end)
-        if switchClass == SWITCH_BLOCK.ability then
-            local now = os.clock()
-            lastAttackAt = now
-            -- Lets the deflect callback recognise a switch GP and give it its own rewards.
-            STABILITY.switchGpAt = now
-        end
-    end
     if Settings.ClashWindowFrames <= 0 then return end
     local ability = Unwrap(context)
     if not valid(ability) then return end
@@ -3898,8 +3233,7 @@ end
 
 local function TryClashWindowHook()
     if clashWindowHooked then return end
-    if Settings.ClashWindowFrames <= 0 and not Settings.ProbeSwitchAttack
-        and not Settings.SwitchAttackBlock and not Settings.SwitchDeflectInject
+    if Settings.ClashWindowFrames <= 0 and not Settings.SwitchAttackBlock and not Settings.SwitchDeflectInject
         and not Settings.SwitchKeepStacks then return end
     if not STABILITY.DiscoveryReady("ability-base") then return end
     local ok, err = STABILITY.TryRegisterHook(CLASH_ABILITY_BASE, TuneClashWindow)
@@ -3909,488 +3243,8 @@ local function TryClashWindowHook()
         return
     end
     clashWindowHooked = true
-    LogKey("clash window: hook ok (%d frames at %d fps; vanilla %.6f s; switch probe=%s)",
-        Settings.ClashWindowFrames, CLASH_FRAME_RATE, CLASH_VANILLA_SECONDS,
-        tostring(Settings.ProbeSwitchAttack))
-end
-
----------------------------------------------------------------------------------------------------------------------
--- Probe: switch-weapon and deflect entry points (temporary, for the block-on-switch feature)
----------------------------------------------------------------------------------------------------------------------
-
-local probeDone = false
-local probeAttempts = 0
-local probeLogs = 0
-
-
-local function ProbeLog(fmt, ...)
-    if probeLogs >= 1400 then
-        if probeLogs == 1400 then
-            probeLogs = probeLogs + 1
-            log("probe: log limit reached")
-        end
-        return
-    end
-    probeLogs = probeLogs + 1
-    log(fmt, ...)
-end
-
--- One-shot AssetRegistry sweep: list cached package paths whose name hints at the execution fire
--- effect, so the mod can spawn/reuse the game's own VFX instead of building one.
-
-
-local function ClassPath(object)
-    local full = safe(function() return object:GetFullName() end)
-    if not full then
-        return nil
-    end
-    return (full:gsub("^Class ", ""))
-end
-
-local function ProbeFunctions(classObject, label, limit)
-    local names = {}
-    local ok = pcall(function()
-        classObject:ForEachFunction(function(fn)
-            local name = safe(function() return fn:GetFullName() end)
-            if name then
-                names[#names + 1] = tostring(name)
-            end
-        end)
-    end)
-    ProbeLog("probe: %s functions=%d ok=%s", label, #names, tostring(ok))
-    for i = 1, math.min(#names, limit) do
-        ProbeLog("probe: %s fn %s", label, names[i])
-    end
-end
-
----------------------------------------------------------------------------------------------------------------------
--- Probe: switch-attack timeline (block judgement on the ChiRen switch attack)
----------------------------------------------------------------------------------------------------------------------
-
--- FName userdata fails IsValid(), so valid() must not gate these reads: that is what turned the
--- previous dump into wrapper addresses. Each reader is tried in turn without touching logError.
-local function ProbeValue(value)
-    if value == nil then return "nil" end
-    local kind = type(value)
-    if kind ~= "userdata" and kind ~= "table" then return tostring(value) end
-    local ok, tag = pcall(function() return value.TagName end)
-    if ok and tag ~= nil then return TagText(value) end
-    -- UObject:ToString() yields "UObject: 0x...", so names must be tried before it. A UClass's own
-    -- class is "Class", which is useless: for those the object's own name IS the ability class.
-    local okName, name = pcall(function() return value:GetFName():ToString() end)
-    local okClass, cls = pcall(function() return value:GetClass():GetFName():ToString() end)
-    if okName and okClass and type(name) == "string" and type(cls) == "string" then
-        if cls == "Class" then return name end
-        return cls .. "/" .. name
-    end
-    if okClass and type(cls) == "string" then return cls end
-    if okName and type(name) == "string" then return name end
-    ok, tag = pcall(function() return value:ToString() end)
-    if ok and type(tag) == "string" then return tag end
-    return kind
-end
-
-local function ProbeFloatArray(value, limit)
-    if value == nil then return "nil" end
-    local parts = {}
-    local ok = pcall(function()
-        value:ForEach(function(_, ref)
-            if #parts >= limit then return end
-            local item = ref
-            pcall(function() item = ref:get() end)
-            parts[#parts + 1] = tostring(item)
-        end)
-    end)
-    if #parts == 0 then return "empty(iterOk=" .. tostring(ok) .. ")" end
-    return table.concat(parts, ",")
-end
-
--- Read-only dump of an ability's Main timeline. Two deflect mechanisms exist: a standalone
--- GAA_DeflectFrame_C row (the clash window) and an attack box that carries its own deflect config.
--- The switch attack has no former row, so the latter is what the block judgement would ride on.
-local function DumpAbilityTimeline(ability, label, verbose)
-    local timeline = readField(ability, "Main")
-    if not valid(timeline) then
-        ProbeLog("%s: no Main timeline", label)
-        return
-    end
-    local rows, deflects, bulletDumps = 0, 0, 0
-    local ok = pcall(function()
-        timeline.Actions:ForEach(function(_, ref)
-            local row = ref:get()
-            rows = rows + 1
-            local action = readField(row, "Action")
-            local actionName = valid(action) and FullName(action) or "nil"
-            local startTime = readNumber(row, "StartTime")
-            local duration = readNumber(row, "duration")
-            if verbose and rows <= 60 then
-                ProbeLog("%s row%d start=%s dur=%s action=%s", label, rows,
-                    tostring(startTime), tostring(duration), actionName)
-                -- Sound actions: dump the cue asset so the tornado can reuse the game's own audio.
-                if actionName:find("PlaySound", 1, true) then
-                    local rawCue = readField(action, "Sound") or readField(action, "SoundCue")
-                        or readField(action, "Cue") or readField(action, "Sound Asset")
-                    if rawCue ~= nil then
-                        local okGet, unwrapped = pcall(function() return rawCue:get() end)
-                        if okGet and unwrapped ~= nil then rawCue = unwrapped end
-                        if valid(rawCue) then rawCue = FullName(rawCue) end
-                    end
-                    ProbeLog("%s row%d sound=%s", label, rows, tostring(rawCue))
-                end
-            end
-            if actionName:find(CLASH_DEFLECT_CLASS, 1, true) then
-                deflects = deflects + 1
-                ProbeLog("%s DEFLECT onlyBlock=%s angle=%s weaponIndex=%s breakTimeline=%s comp=%s",
-                    label, ProbeValue(readField(action, "Only Block Hit")),
-                    ProbeValue(readNumber(action, "Deflect Angle")),
-                    ProbeValue(readNumber(action, "Weapon Index")),
-                    ProbeValue(readField(action, "Break Deflect Timeline")),
-                    ProbeValue(readField(action, "Deflect Component")))
-                ProbeLog("%s DEFLECT melee=%s projectile=%s prepare=%s impact=%s maxHitTime=%s",
-                    label, ProbeValue(readField(action, "Melee Result")),
-                    ProbeValue(readField(action, "Projectile Result")),
-                    ProbeValue(readField(action, "Prepare Event")),
-                    ProbeValue(readField(action, "Impact Event")),
-                    ProbeValue(readNumber(action, "Max Hit Game Time")))
-            end
-            -- Matched by family keyword, then confirmed by field presence, so empty subclasses such
-            -- as LGAAction_AddtiveBullet_PreZui_Hun are covered without walking the super chain.
-            if actionName:find("Deflect", 1, true) or actionName:find("Bullet", 1, true) then
-                local hasType, bulletType = pcall(function() return action.DeflectBulletType end)
-                if hasType and bulletType ~= nil and bulletDumps < 4 then
-                    bulletDumps = bulletDumps + 1
-                    ProbeLog("%s BOX row%d start=%s dur=%s type=%s(0=CantDeflect,1=Normal,5=Hold) angle=%s radius=%s knockback=%s holdDist=%s staticRadius=%s",
-                        label, rows, tostring(startTime), tostring(duration), ProbeValue(bulletType),
-                        ProbeValue(readNumber(action, "DeflectAngle")),
-                        ProbeValue(readNumber(action, "DeflectRadius")),
-                        ProbeValue(readNumber(action, "DeflectKnockback")),
-                        ProbeValue(readNumber(action, "HoldDeflectDistance")),
-                        ProbeValue(readField(action, "bStaticRadius")))
-                    ProbeLog("%s BOX row%d strength=%s direction=%s counterAbility=%s branch=%s cachedComp=%s",
-                        label, rows, ProbeValue(readField(action, "DeflectStrength")),
-                        ProbeValue(readField(action, "DeflectDirection")),
-                        ProbeValue(readField(action, "CounterAbility")),
-                        ProbeValue(readField(action, "Branch")),
-                        ProbeValue(readField(action, "CachedDeflectComponent")))
-                    ProbeLog("%s BOX row%d bulletDur=%s preHit=%s runtimePreHit=%s reps=%s sendFrames=[%s] startBullet=[%s] endBullet=[%s]",
-                        label, rows, ProbeValue(readNumber(action, "BulletDuration")),
-                        ProbeValue(readNumber(action, "PreHitPointDuration")),
-                        ProbeValue(readNumber(action, "RuntimePreHitPointDuration")),
-                        ProbeValue(readNumber(action, "BulletRepetitions")),
-                        ProbeFloatArray(readField(action, "SendFrameTimes"), 12),
-                        ProbeFloatArray(readField(action, "StartBulletTimes"), 8),
-                        ProbeFloatArray(readField(action, "EndBulletTimes"), 8))
-                end
-            end
-        end)
-    end)
-    ProbeLog("%s: rows=%d deflectRows=%d boxRows=%d iterOk=%s", label, rows, deflects, bulletDumps,
-        tostring(ok))
-end
-
-local switchSeen = {}
-local switchDumped = {}
-local switchActivateLogs = 0
-local switchSeqLogs = 0
-
--- Rides the clash-window hook so only one ability-base hook is ever installed. Records the first
--- activation of every player ability, which is how the talent's LB+Y replacement gets identified.
-ProbeSwitchActivate = function(context)
-    local ability = Unwrap(context)
-    if not valid(ability) then return end
-    local outer = safe(function() return ability:GetOuter() end)
-    local outerName = valid(outer) and FullName(outer) or "?"
-    if not outerName:find("BP_Renewal_Hun", 1, true) then return end
-    local className = safe(function() return ability:GetClass():GetFName():ToString() end)
-    if not className then return end
-    local isSwitch = className:find("SWT", 1, true) or className:find("Switch", 1, true)
-        or className:find("Counter", 1, true)
-    -- The user confirmed the ChiRen switch attack IS the LB+Y fire sweep, and that switching may call
-    -- the same ability as the manual button. GA_Hun_ChiRen_C_C is the likely manual entry, so every
-    -- ChiRen ability gets dumped; non-switch ones only log their deflect boxes to stay in budget.
-    local isChiRen = className:find("ChiRen", 1, true)
-    -- Execution candidates: one finisher swings out a large fire tornado, so dump these timelines too
-    -- and look for the fire VFX row.
-    local isExec = className:find("Execut", 1, true) or className:find("Finish", 1, true)
-        or className:find("ChuJue", 1, true) or className:find("Kill", 1, true)
-        or className:find("Death", 1, true)
-    if not switchSeen[className] then
-        switchSeen[className] = true
-        if switchActivateLogs < 40 then
-            switchActivateLogs = switchActivateLogs + 1
-            ProbeLog("switch probe: activate %s", className)
-        end
-        if (isSwitch or isChiRen or isExec) and not switchDumped[className] then
-            switchDumped[className] = true
-            DumpAbilityTimeline(ability, "switch probe " .. className, isSwitch or isExec)
-        end
-    end
-    -- Every activation, not just the first: this shows whether a weapon swap fires SWT_C, C_C or
-    -- both. Light-attack chains are excluded so they cannot spend the budget before the swap.
-    local isChiRenKey = isChiRen and not className:find("ChiRen_A", 1, true)
-    if switchSeqLogs < 60 and (isSwitch or isChiRenKey or className:find("Heavy", 1, true)) then
-        switchSeqLogs = switchSeqLogs + 1
-        ProbeLog("switch seq %d: %s", switchSeqLogs, className)
-    end
-    if className == SWITCH_BLOCK.ability then
-        SWITCH_BLOCK.activations = SWITCH_BLOCK.activations + 1
-    end
-end
-
-local switchInstancesDone = false
-
--- Does not depend on the player actually switching: dumps whatever switch-attack instances exist.
--- Skips classes the activation hook already dumped so the two paths cannot spend the budget twice.
-local function ProbeSwitchInstances()
-    if switchInstancesDone then return end
-    if not valid(GetPlayerPawn()) then return end
-    switchInstancesDone = true
-    local found = safe(FindAllOf, "BP_SwitchAttack_Base_C")
-    if not found or #found == 0 then
-        ProbeLog("switch probe: no BP_SwitchAttack_Base_C instance")
-        return
-    end
-    ProbeLog("switch probe: %d switch-attack instances", #found)
-    local dumped = 0
-    for _, ability in ipairs(found) do
-        if dumped >= 2 then break end
-        if valid(ability) then
-            local className = safe(function() return ability:GetClass():GetFName():ToString() end)
-            if className and not switchDumped[className] then
-                switchDumped[className] = true
-                dumped = dumped + 1
-                ProbeLog("switch probe: instance %d %s", dumped, className)
-                DumpAbilityTimeline(ability, "switch probe inst" .. dumped, true)
-            end
-        end
-    end
-end
-
-local function ProbeSwitchWeapon()
-    local classObject = safe(StaticFindObject,
-        "/PBZCombatAsset/Prototypes/Actions/GAA_SwitchWeapon.GAA_SwitchWeapon_C")
-    if not valid(classObject) then
-        local found = safe(FindAllOf, "GAA_SwitchWeapon_C")
-        if found and #found > 0 then
-            classObject = found[1]
-        end
-    end
-    if not valid(classObject) then
-        ProbeLog("probe: GAA_SwitchWeapon_C not found")
-        return false
-    end
-    local path = ClassPath(classObject)
-    ProbeLog("probe: switch class=%s path=%s", FullName(classObject), tostring(path))
-    ProbeFunctions(classObject, "switch", 40)
-    if path then
-        for _, fn in ipairs({ "OnStart", "OnEnd", "OnActivate", "OnDeactivate", "Activate", "Deactivate",
-            "Execute", "K2_ActivateAbility", "StartSwitchWeapon" }) do
-            local hooked, err = STABILITY.TryRegisterHook(path .. ":" .. fn, function(context)
-                local self = Unwrap(context)
-                ProbeLog("probe: switchWeapon %s instance=%s", fn, FullName(self))
-            end)
-            ProbeLog("probe: hook %s ok=%s%s", fn, tostring(hooked),
-                hooked and "" or (" err=" .. tostring(err)))
-        end
-    end
-    return true
-end
-
-local function ProbeStances()
-    local stances = safe(FindAllOf, "BP_StanceAction_Base_Player_C")
-    if not stances or #stances == 0 then
-        ProbeLog("probe: no player stance instances")
-        return
-    end
-    ProbeLog("probe: player stance instances=%d", #stances)
-    for i, stance in ipairs(stances) do
-        if i > 6 then
-            break
-        end
-        if valid(stance) then
-            ProbeLog("probe: stance %s slot=%s perfect=%s great=%s normal=%s", FullName(stance),
-                tostring(readField(stance, "Weapon Slot")),
-                tostring(readNumber(stance, "Perfect Window")),
-                tostring(readNumber(stance, "Great Window")),
-                tostring(readNumber(stance, "Normal Window")))
-            if i == 1 then
-                ProbeFunctions(stance:GetClass(), "stance", 30)
-                local path = classPathOf(stance)
-                if path then
-                    local hooked = STABILITY.TryRegisterHook(path .. ":K2_ActivateAbility", function()
-                        ProbeLog("probe: stance K2_ActivateAbility")
-                    end)
-                    ProbeLog("probe: hook stance K2_ActivateAbility ok=%s", tostring(hooked))
-                end
-            end
-        end
-    end
-end
-
-local function ProbeDeflect()
-    local comps = safe(FindAllOf, "DeflectComponent")
-    if not comps then
-        return
-    end
-    for _, comp in ipairs(comps) do
-        if valid(comp) then
-            local owner = safe(function() return comp:GetOuter() end)
-            local name = owner and FullName(owner) or ""
-            if name:find("BP_Renewal_Hun", 1, true) then
-                local path = classPathOf(comp)
-                if path then
-                    for _, fn in ipairs({ "SendDeflectFrame", "StopSendDeflectFrame" }) do
-                        local hooked = STABILITY.TryRegisterHook(path .. ":" .. fn, function()
-                            ProbeLog("probe: player %s", fn)
-                        end)
-                        ProbeLog("probe: hook player %s ok=%s", fn, tostring(hooked))
-                    end
-                end
-                break
-            end
-        end
-    end
-end
-
-local hitstateProbeDone = false
-local hitstateProbeTries = 0
-
--- Every loaded hit-state GE component names the state it drives. One of these GEs should play the full
--- reaction animation; the probe lists them so the interrupt can use that instead of ChangeHitState.
-local function ProbeHitStateGes()
-    if hitstateProbeDone then
-        return
-    end
-    local comps = safe(FindAllOf, "HitStateGameplayEffectComponent")
-    if not comps or #comps == 0 then
-        comps = safe(FindAllOf, "/Script/SGameCombatSystem.HitStateGameplayEffectComponent")
-    end
-    if not comps or #comps == 0 then
-        hitstateProbeTries = hitstateProbeTries + 1
-        if hitstateProbeTries <= 5 then
-            ProbeLog("probe: no HitStateGameplayEffectComponent instances")
-            return
-        end
-        -- The short name did not resolve; filter every loaded effect component by class name.
-        local all = safe(FindAllOf, "GameplayEffectComponent")
-        if all then
-            local filtered = {}
-            for _, comp in ipairs(all) do
-                if valid(comp) then
-                    local class = safe(function() return comp:GetClass():GetFullName() end)
-                    if class and class:find("HitState", 1, true) then
-                        filtered[#filtered + 1] = comp
-                    end
-                end
-            end
-            comps = filtered
-        end
-        if not comps or #comps == 0 then
-            hitstateProbeDone = true
-            ProbeLog("probe: hitstate component probe gave up")
-            return
-        end
-        ProbeLog("probe: hitstate components=%d (filtered)", #comps)
-    else
-        ProbeLog("probe: hitstate components=%d", #comps)
-    end
-    hitstateProbeDone = true
-    for i, comp in ipairs(comps) do
-        if i > 20 then
-            break
-        end
-        if valid(comp) then
-            local owner = safe(function() return comp:GetOuter() end)
-            local tag = readField(comp, "HitState")
-            local tagName = tag and FNameText(readField(tag, "TagName")) or "nil"
-            ProbeLog("probe: hitstate GE %s tag=%s end=%s remove=%s stop=%s",
-                valid(owner) and FullName(owner) or "?",
-                tostring(tagName),
-                tostring(readField(comp, "EndStrengthAnimTask")),
-                tostring(readField(comp, "RemoveOnEnd")),
-                tostring(readField(comp, "StopGEOnHitStateEnd")))
-        end
-    end
-end
-
-local animSetProbeDone = false
-
-local function ProbeAnimSets()
-    if animSetProbeDone then
-        return
-    end
-    local sets = safe(FindAllOf, "HitStrengthAnimSetBase")
-    if not sets or #sets == 0 then
-        return
-    end
-    animSetProbeDone = true
-    ProbeLog("probe: hitstrength anim sets=%d", #sets)
-    local shown = 0
-    for _, set in ipairs(sets) do
-        if shown >= 20 then
-            break
-        end
-        if valid(set) then
-            local name = FullName(set)
-            if name:find("YuBi", 1, true) or name:find("Monster", 1, true) then
-                shown = shown + 1
-                local parts = {}
-                for _, field in ipairs({ "F", "B", "L", "R", "FLoop", "BLoop" }) do
-                    local value = readField(set, field)
-                    if valid(value) then
-                        parts[#parts + 1] = field .. "=" .. FullName(value)
-                    end
-                end
-                ProbeLog("probe: animset %s %s", name, table.concat(parts, " "))
-            end
-        end
-    end
-end
-
-local hitAnimProbeDone = false
-
-local function ProbeHitAnims()
-    if hitAnimProbeDone then
-        return
-    end
-    local anims = safe(FindAllOf, "PDA_HitAnim_MobNew_C")
-    if not anims or #anims == 0 then
-        return
-    end
-    hitAnimProbeDone = true
-    ProbeLog("probe: mob hit anim data=%d", #anims)
-    local shown = 0
-    for i, anim in ipairs(anims) do
-        if shown >= 20 then
-            break
-        end
-        if valid(anim) then
-            local name = FullName(anim)
-            if i <= 10 or name:find("YuBi", 1, true) or name:find("Monster", 1, true) then
-                shown = shown + 1
-                ProbeLog("probe: hitanim %s", name)
-            end
-        end
-    end
-end
-
-local function ProbeOnce()
-    if probeDone then
-        return
-    end
-    probeAttempts = probeAttempts + 1
-    local pawn = GetPlayerPawn()
-    if not valid(pawn) then
-        return
-    end
-    if ProbeSwitchWeapon() then
-        ProbeStances()
-        ProbeDeflect()
-        probeDone = true
-    elseif probeAttempts >= 5 then
-        probeDone = true
-        ProbeLog("probe: switch weapon class was never found")
-    end
+    LogKey("clash window: hook ok (%d frames at %d fps; vanilla %.6f s)",
+        Settings.ClashWindowFrames, CLASH_FRAME_RATE, CLASH_VANILLA_SECONDS)
 end
 
 ---------------------------------------------------------------------------------------------------------------------
@@ -4399,31 +3253,13 @@ end
 
 local function Tick()
     if not GetPlayerPawn() then return end
-    TryDeflectHook()
     TryHitreactHook()
-    TryBlockHook()
-    -- Register the short break-montage observer whenever the feature is enabled; do not couple
-    -- gameplay observation to verbose diagnostic logging.
-    if Settings.ProbeSwitchAttack or Settings.BreakOnClash then
-        TryMontageHook()
-    end
+    TryDeflectHook()
     for _, name in ipairs(HEAVY_CLASSES) do
         HookHeavy(name)
     end
-    for _, name in ipairs(ATTACK_CLASSES) do
-        HookAttack(name)
-    end
     TuneDeflectWindow()
     TryClashWindowHook()
-    if Settings.ProbeSwitchAttack then
-        TryNativeInvulnProbe()
-        HookChiRenGas()
-        ProbeSwitchInstances()
-        ProbeOnce()
-        ProbeHitStateGes()
-        ProbeAnimSets()
-        ProbeHitAnims()
-    end
 end
 
 
@@ -4452,15 +3288,19 @@ function STABILITY.ObservePlayer()
         if STABILITY.burnVisual then
             STABILITY.RunBounded("enemy burn visual reset", STABILITY.burnVisual.reset)
         end
+        if STABILITY.tornadoHud then
+            STABILITY.RunBounded("tornado HUD reset", STABILITY.tornadoHud.reset)
+        end
         STABILITY.currentPlayerKey = key
         invulnToken = invulnToken + 1
         invulnGuardToken = invulnGuardToken + 1
         breakToken = breakToken + 1
-        charges, lastClash, lastAttackAt, lastBlockImpactAt = 0, 0, 0, 0
+        charges, lastClash = 0, 0
         fireAppliedAt, fireUntil, fireAskedSeconds, fireReapplyAt, lastBurning = nil, nil, nil, nil, nil
-        invulnHandle, STABILITY.invulnOwner, invulnUntil = nil, nil, 0
-        breakMeter, breakWatchUntil, breakWatchName = {}, 0, nil
+        invulnHandle, STABILITY.invulnOwner = nil, nil
+        breakMeter = {}
         TORNADO.combo, TORNADO.followup = 0, nil
+        STABILITY.deflectSource = nil
         SWITCH_KEEP.snap, SWITCH_KEEP.frozen, SWITCH_KEEP.wasEquipped = nil, nil, nil
         SWITCH_KEEP.lastTier, SWITCH_KEEP.backAt = nil, 0
         LogKey("player changed; transient state cleared")
@@ -4471,7 +3311,6 @@ end
 local function TickSafe()
     if STABILITY.ObservePlayer() then
         STABILITY.RunBounded("discovery", Tick)
-        if STABILITY.diagnostics then STABILITY.RunBounded("diagnostics", STABILITY.diagnostics.tick) end
     end
     return false
 end
@@ -4497,13 +3336,39 @@ local function SampleSafe()
     end
     if Settings.FireEnabled then STABILITY.RunBounded("burning", CheckBurning) end
     if Settings.SwitchKeepStacks then STABILITY.RunBounded("switch keep", KeepTick) end
-    if Settings.LogDamage then STABILITY.RunBounded("damage", TickDamage, os.clock()) end
+    if STABILITY.tornadoHud then STABILITY.RunBounded("tornado HUD", STABILITY.tornadoHud.tick) end
     return false
 end
 
 log(VERSION .. " loaded")
 
--- Gameplay body-fire is independent of development probes.
+if Settings.HighlightTornadoReady then
+    local ok, hud = pcall(function()
+        local tierThree = { TagName = FName("CharacterState.AbilityState.Long.Buff.Lv3", EFindName.FNAME_Add) }
+        local equipped = { TagName = FName(CHIREN_EQUIP_TAG, EFindName.FNAME_Add) }
+        return require("chiren_tornado_hud")({
+            valid = valid, fullName = FullName, read = readField, find = FindAllOf,
+            finite = STABILITY.IsFiniteNumber, trace = LogEvent, error = logError,
+            ready = function()
+                local castAt = STABILITY.tornadoCastAt
+                if castAt and os.clock() - castAt < 3.0 then return false end
+                local _, asc = PlayerAbilities()
+                if not valid(asc) then return false end
+                local tierCount = safe(function() return asc:GetGameplayTagCount(tierThree) end)
+                if type(tierCount) ~= "number" or tierCount <= 0 then return false end
+                local equipCount = safe(function() return asc:GetGameplayTagCount(equipped) end)
+                return type(equipCount) == "number" and equipCount > 0
+            end,
+        })
+    end)
+    if ok and type(hud) == "table" then
+        STABILITY.tornadoHud = hud
+        LogKey("tornado HUD: ready highlight enabled")
+    else
+        logError("tornado HUD unavailable: " .. tostring(hud))
+    end
+end
+
 if Settings.EnemyBurnVisual then
     local ok, factory = pcall(require, "chiren_burn_visual")
     if ok and type(factory) == "function" then
@@ -4515,35 +3380,6 @@ if Settings.EnemyBurnVisual then
         if initialized and type(module) == "table" then STABILITY.burnVisual = module
         else logError("burn visual unavailable: " .. tostring(module)) end
     else logError("burn visual module missing; damage unchanged") end
-end
-
--- One bounded metadata pass; never enabled by release defaults.
-if Settings.ProbeNativeFinish then
-    local ok, factory = pcall(require, "chiren_finish_probe")
-    if ok and type(factory) == "function" then
-        local initialized, probe = pcall(factory, {valid=valid, readField=readField, fullName=FullName, log=log})
-        if initialized and type(probe) == "function" then STABILITY.finishProbe = probe
-        else logError("finish metadata probe unavailable") end
-    else logError("finish metadata module missing") end
-end
-
--- Optional research lives in a separate file. Release defaults never load or schedule it.
-if Settings.ProbeBurnVisual or Settings.ProbeCombatApi or Settings.TestBurnAttach then
-    local okDiag, factory = pcall(require, "chiren_diagnostics")
-    if okDiag and type(factory) == "function" then
-        local okInit, diagnostics = pcall(factory, {
-            settings = Settings, log = log, valid = valid, readField = readField,
-            player = GetPlayerPawn, playerKey = STABILITY.PlayerKey, samePlayer = STABILITY.SamePlayer,
-            after = STABILITY.After, fullName = FullName,
-        })
-        if okInit and type(diagnostics) == "table" then
-            STABILITY.diagnostics = diagnostics
-        else
-            logError("diagnostics disabled: " .. tostring(diagnostics))
-        end
-    else
-        logError("diagnostics disabled: module unavailable")
-    end
 end
 
 function STABILITY.StartLoop(delay, callback)

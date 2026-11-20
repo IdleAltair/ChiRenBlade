@@ -1,5 +1,5 @@
 -- ============================================================================
--- 影之刃零 · 炽刃 Mod 配置文件 (ChiRen Blade 1.0 Settings)
+-- 影之刃零 · 炽刃 Mod 配置文件 (ChiRen Blade 1.1 Settings)
 -- 调参向导整理：猫猫 (Gemini) 喵～
 --
 -- 【怎么改设置喵？】
@@ -63,6 +63,10 @@ return {
     -- 开启后拼刀 1 次刀劲即满，放龙卷前的普通重击也会吃到满档加成喵。
     -- Force blade tier to Lv3 after a single clash so 1 clash can cast Whirlwind (true/false).
     TornadoEasyCast = false,
+
+    -- 炽刃满三档、可施放风回云卷时，将刀劲图案叠成黑红色。填 false 可关闭提示。
+    -- Tint the blade-force icon black-red while Whirlwind is ready.
+    HighlightTornadoReady = true,
 
     -- 风回云卷的保底伤害倍率下限。默认 1 即倍率等于拼刀层数（1层1倍…6层6倍）；调高可保底（如填 3 则保底 3 倍）。
     -- 【有效范围：1 ~ 6】注意不能填得比下面的 TornadoClashMax 更大喵！
@@ -213,8 +217,8 @@ return {
 
 
     -- ========================================================================
-    -- 【第六区：底层防呆、日志与内部调试项（普通玩家请保持默认，无需修改喵！）】
-    -- Section 6: Internal Safeguards, Fallback Routes & Diagnostics (Keep defaults)
+    -- 【第六区：底层防呆与日志（普通玩家请保持默认，无需修改喵！）】
+    -- Section 6: Internal Safeguards, Fallback Routes & Logging (Keep defaults)
     -- ========================================================================
 
     -- 拼刀去重冷却（0~2s）、弹刀触发总开关、无敌锁血兜底、龙卷还原超时（1~8s）、破防维持窗口（0~3s）
@@ -229,13 +233,7 @@ return {
     SwitchAttackBranch = "Normal",
     SwitchAttackWindowFrames = 7,
 
-    -- 日志与开发者内部探针（LogImportant 默认开启记录关键加载与触发；其余日常游玩全部保持 false 喵）
+    -- 日志。LogImportant 记录加载与关键状态，错误始终记录。LogEvents 默认关闭，需要排查时可开启。
     LogImportant = true,
     LogEvents = false,
-    LogDamage = false,
-    ProbeSwitchAttack = false,
-    ProbeNativeFinish = false,
-    ProbeBurnVisual = false,
-    ProbeCombatApi = false,
-    TestBurnAttach = false,
 }
